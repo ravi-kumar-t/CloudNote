@@ -19,38 +19,85 @@ async def select_latest_event(page: Page):
     page_title = await page.title()
     logger.info(f"Page title before calendar detection: {page_title}")
     
-    events = []
+    # Capture screenshot before event parsing
+    if not os.path.exists(settings.SCREENSHOTS_DIR):
+        os.makedirs(settings.SCREENSHOTS_DIR)
+    screenshot_path = os.path.join(settings.SCREENSHOTS_DIR, "pre_event_parsing.png")
+    await page.screenshot(path=screenshot_path)
+    logger.info(f"Captured pre-parsing screenshot at {screenshot_path}")
+    
+    # Capture targeted DOM debugging information for timetable section
+    try:
+        timetable_container = await page.query_selector("div.fc-view-container, div.calendar-container, #calendar, div.fc")
+        if timetable_container:
+            timetable_html = await timetable_container.inner_html()
+            logger.debug(f"Timetable DOM Snippet (First 2000 chars): {timetable_html[:2000]}")
+        else:
+            logger.debug("Could not find main timetable container for DOM snapshot.")
+    except Exception as dom_e:
+        logger.warning(f"Failed to capture DOM snippet: {dom_e}")
+    
+    valid_events = []
     for attempt in range(3):
         try:
             await page.wait_for_selector(CalendarSelectors.EVENT_BOX, timeout=30000)
             events = await page.query_selector_all(CalendarSelectors.EVENT_BOX)
-            if events:
+            
+            logger.info(f"Attempt {attempt+1}: Detected {len(events)} raw elements matching selector.")
+            
+            valid_events = []
+            for i, ev in enumerate(events):
+                try:
+                    classes = await ev.get_attribute("class") or ""
+                    text_content = await ev.inner_text() or ""
+                    is_visible = await ev.is_visible()
+                    
+                    logger.info(f"Element {i} Diagnostics -> Classes: '{classes}' | Visible: {is_visible} | Text: '{text_content.strip()}'")
+                    
+                    if not is_visible:
+                        continue
+                        
+                    if "fc-mirror-container" in classes or "placeholder" in classes.lower() or "fc-bgevent" in classes:
+                        continue
+                        
+                    # Some empty containers might still render
+                    if not text_content.strip():
+                        continue
+                        
+                    valid_events.append(ev)
+                except Exception as eval_err:
+                    logger.warning(f"Failed to evaluate element {i}: {eval_err}")
+            
+            if valid_events:
+                logger.info(f"Filtered down to {len(valid_events)} valid lecture events.")
                 break
+            else:
+                logger.info("No valid lecture events found after filtering. Retrying...")
+                await asyncio.sleep(5)
+                
         except Exception as e:
             logger.warning(f"Attempt {attempt+1}: Failed to find events - {e}")
             await asyncio.sleep(5)
             
-    if not events:
+    if not valid_events:
         logger.warning("No active lecture events found.")
         html_content = await page.content()
         logger.debug(f"Page HTML when no events found: {html_content[:1000]}...")
         
-        if not os.path.exists(settings.SCREENSHOTS_DIR):
-            os.makedirs(settings.SCREENSHOTS_DIR)
-        screenshot_path = os.path.join(settings.SCREENSHOTS_DIR, "no_events_found.png")
-        await page.screenshot(path=screenshot_path)
-        logger.info(f"Captured targeted debugging screenshot at {screenshot_path}")
+        screenshot_path_fail = os.path.join(settings.SCREENSHOTS_DIR, "no_events_found.png")
+        await page.screenshot(path=screenshot_path_fail)
+        logger.info(f"Captured targeted debugging screenshot at {screenshot_path_fail}")
         
         return False
     
-    logger.info(f"Found {len(events)} events. Selecting the first one...")
+    logger.info(f"Selecting the first valid event...")
     # Click the first event found (usually the active one)
     # Using JavaScript click to avoid intersection issues common in these portals
-    clickable = await events[0].query_selector("a, div")
+    clickable = await valid_events[0].query_selector("a, div")
     if clickable:
         await clickable.evaluate("node => node.click()")
     else:
-        await events[0].evaluate("node => node.click()")
+        await valid_events[0].evaluate("node => node.click()")
     
     await asyncio.sleep(2) # Wait for event details to pop up
     return True
@@ -127,7 +174,7 @@ async def join_class_pipeline(page: Page):
         has_events = await select_latest_event(page)
         if not has_events:
             logger.info("Pipeline finishing gracefully because no active classes exist.")
-            return True
+            return False
         
         # Handle countdown if present
         await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)

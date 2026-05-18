@@ -22,9 +22,11 @@ async def run_ingestion():
         )
         
         # Create a browser context with permissions for microphone
+        logger.info("Initializing browser context with HTTPS certificate bypass enabled...")
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720},
-            permissions=['microphone']
+            permissions=['microphone'],
+            ignore_https_errors=True
         )
         
         page = await context.new_page()
@@ -37,15 +39,20 @@ async def run_ingestion():
             
             # Phase 2: Joining Workflow
             from .joiner import join_class_pipeline
-            await join_class_pipeline(page)
+            joined = await join_class_pipeline(page)
             
-            logger.info("Successfully joined the class session.")
-            
-            # Keep session alive
-            logger.info("Session is now ACTIVE. Heartbeat started.")
-            while True:
-                logger.info("Worker Status: HEALTHY | Session: ACTIVE")
-                await asyncio.sleep(300) # Every 5 minutes
+            if joined:
+                logger.info("Successfully joined the class session.")
+                # Keep session alive
+                logger.info("Session is now ACTIVE. Heartbeat started.")
+                while True:
+                    logger.info("Worker Status: HEALTHY | Session: ACTIVE")
+                    await asyncio.sleep(300) # Every 5 minutes
+            else:
+                logger.info("No class was joined. Entering standby heartbeat.")
+                while True:
+                    logger.info("Worker Status: HEALTHY | Session: STANDBY (No Active Classes)")
+                    await asyncio.sleep(300)
                 
         except asyncio.CancelledError:
             logger.info("Shutdown signal received. Closing session gracefully...")
