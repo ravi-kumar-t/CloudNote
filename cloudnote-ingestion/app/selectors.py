@@ -5,8 +5,8 @@ class LoginSelectors:
 
 class CalendarSelectors:
     VIEW_CLASSES_BUTTON = "text=/View Classes/i"
-    EVENT_BOX = "div.fc-event"
-    EVENT_CLICKABLE = "div.fc-event a, div.fc-event div"
+    EVENT_BOX = "div.fc-event, div.calendar-event, div[class*='event']"
+    EVENT_CLICKABLE = "div.fc-event a, div.fc-event div, div.calendar-event a, div[class*='event'] a"
     COUNTDOWN_TEXT = "//*[contains(text(),'join') or contains(text(),'h')]"
     JOIN_BUTTON = "a.joinBtn, button:has-text('Join'), text='Join'"
 

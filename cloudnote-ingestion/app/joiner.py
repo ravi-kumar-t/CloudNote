@@ -1,4 +1,5 @@
 import asyncio
+import os
 from playwright.async_api import Page, TimeoutError
 from .logger import logger
 from .selectors import CalendarSelectors, MeetingSelectors
@@ -15,11 +16,32 @@ async def open_calendar(page: Page):
 async def select_latest_event(page: Page):
     """Finds and clicks the most recent class event."""
     logger.info("Detecting calendar events...")
-    await page.wait_for_selector(CalendarSelectors.EVENT_BOX, timeout=10000)
+    page_title = await page.title()
+    logger.info(f"Page title before calendar detection: {page_title}")
     
-    events = await page.query_selector_all(CalendarSelectors.EVENT_BOX)
+    events = []
+    for attempt in range(3):
+        try:
+            await page.wait_for_selector(CalendarSelectors.EVENT_BOX, timeout=30000)
+            events = await page.query_selector_all(CalendarSelectors.EVENT_BOX)
+            if events:
+                break
+        except Exception as e:
+            logger.warning(f"Attempt {attempt+1}: Failed to find events - {e}")
+            await asyncio.sleep(5)
+            
     if not events:
-        raise Exception("No class events found on calendar.")
+        logger.warning("No active lecture events found.")
+        html_content = await page.content()
+        logger.debug(f"Page HTML when no events found: {html_content[:1000]}...")
+        
+        if not os.path.exists(settings.SCREENSHOTS_DIR):
+            os.makedirs(settings.SCREENSHOTS_DIR)
+        screenshot_path = os.path.join(settings.SCREENSHOTS_DIR, "no_events_found.png")
+        await page.screenshot(path=screenshot_path)
+        logger.info(f"Captured targeted debugging screenshot at {screenshot_path}")
+        
+        return False
     
     logger.info(f"Found {len(events)} events. Selecting the first one...")
     # Click the first event found (usually the active one)
@@ -31,6 +53,7 @@ async def select_latest_event(page: Page):
         await events[0].evaluate("node => node.click()")
     
     await asyncio.sleep(2) # Wait for event details to pop up
+    return True
 
 async def click_join_button(page: Page):
     """Retries clicking the Join button until success or timeout."""
@@ -101,7 +124,10 @@ async def join_class_pipeline(page: Page):
     """Orchestrates the entire joining flow."""
     try:
         await open_calendar(page)
-        await select_latest_event(page)
+        has_events = await select_latest_event(page)
+        if not has_events:
+            logger.info("Pipeline finishing gracefully because no active classes exist.")
+            return True
         
         # Handle countdown if present
         await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)

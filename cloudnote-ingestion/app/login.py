@@ -20,6 +20,11 @@ async def perform_login(page: Page):
         # Verify login success by waiting for a post-login element
         # Here we can wait for the 'View Classes' button or similar dashboard element
         await page.wait_for_load_state("networkidle")
+        await page.wait_for_timeout(3000)  # Page stabilization wait after login
+        
+        current_url = page.url
+        logger.info(f"Post-login current URL: {current_url}")
+        
         logger.info("Login process completed.")
         
     except Exception as e:
