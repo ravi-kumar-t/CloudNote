@@ -28,48 +28,61 @@ async def select_latest_event(page: Page):
     
     # Capture targeted DOM debugging information for timetable section
     try:
-        timetable_container = await page.query_selector("div.fc-view-container, div.calendar-container, #calendar, div.fc")
+        timetable_selector = "div.fc-view-container, div.calendar-container, #calendar, div.fc"
+        await page.wait_for_selector(timetable_selector, timeout=30000)
+        timetable_container = await page.query_selector(timetable_selector)
         if timetable_container:
             timetable_html = await timetable_container.inner_html()
             logger.debug(f"Timetable DOM Snippet (First 2000 chars): {timetable_html[:2000]}")
         else:
             logger.debug("Could not find main timetable container for DOM snapshot.")
     except Exception as dom_e:
-        logger.warning(f"Failed to capture DOM snippet: {dom_e}")
+        logger.warning(f"Failed to capture DOM snippet or timetable container not found: {dom_e}")
     
     valid_events = []
     for attempt in range(3):
         try:
-            await page.wait_for_selector(CalendarSelectors.EVENT_BOX, timeout=30000)
-            events = await page.query_selector_all(CalendarSelectors.EVENT_BOX)
+            # 1. REMOVE: wait_for_selector("div.fc-event...")
+            # 2. wait for timetable container only (done above)
             
-            logger.info(f"Attempt {attempt+1}: Detected {len(events)} raw elements matching selector.")
+            # 3. Use: page.locator(...).all()
+            candidate_locators = await page.locator("div.fc-event, div.calendar-event, div[class*='event'], a.fc-event, a.fc-time-grid-event").all()
+            
+            logger.info(f"Attempt {attempt+1}: Detected {len(candidate_locators)} raw candidate locators.")
             
             valid_events = []
-            for i, ev in enumerate(events):
+            for i, loc in enumerate(candidate_locators):
                 try:
-                    classes = await ev.get_attribute("class") or ""
-                    text_content = await ev.inner_text() or ""
-                    is_visible = await ev.is_visible()
+                    # 4. For every candidate: get class names, text, visibility, bounding box
+                    classes = await loc.get_attribute("class") or ""
+                    text_content = await loc.inner_text() or ""
+                    is_visible = await loc.is_visible()
+                    box = await loc.bounding_box()
                     
-                    logger.info(f"Element {i} Diagnostics -> Classes: '{classes}' | Visible: {is_visible} | Text: '{text_content.strip()}'")
+                    # 7. Add diagnostic logging
+                    box_str = f"x:{box['x']:.1f}, y:{box['y']:.1f}, w:{box['width']:.1f}, h:{box['height']:.1f}" if box else "None"
+                    logger.info(f"Candidate {i} Diagnostics -> Classes: '{classes}' | Text: '{text_content.strip()}' | Visible: {is_visible} | BoundingBox: {box_str}")
                     
+                    # 5. IGNORE: fc-mirror-container, zero-size elements, hidden elements, empty-text elements
                     if not is_visible:
                         continue
                         
                     if "fc-mirror-container" in classes or "placeholder" in classes.lower() or "fc-bgevent" in classes:
                         continue
                         
-                    # Some empty containers might still render
                     if not text_content.strip():
                         continue
                         
-                    valid_events.append(ev)
+                    if not box or box["width"] == 0 or box["height"] == 0:
+                        continue
+                        
+                    # 6. PRIORITIZE elements that are valid
+                    valid_events.append(loc)
                 except Exception as eval_err:
-                    logger.warning(f"Failed to evaluate element {i}: {eval_err}")
+                    logger.warning(f"Failed to evaluate candidate {i}: {eval_err}")
             
             if valid_events:
-                logger.info(f"Filtered down to {len(valid_events)} valid lecture events.")
+                logger.info(f"Filtered down to {len(valid_events)} valid REAL lecture events.")
                 break
             else:
                 logger.info("No valid lecture events found after filtering. Retrying...")
@@ -90,16 +103,44 @@ async def select_latest_event(page: Page):
         
         return False
     
-    logger.info(f"Selecting the first valid event...")
-    # Click the first event found (usually the active one)
-    # Using JavaScript click to avoid intersection issues common in these portals
-    clickable = await valid_events[0].query_selector("a, div")
-    if clickable:
-        await clickable.evaluate("node => node.click()")
-    else:
-        await valid_events[0].evaluate("node => node.click()")
+    logger.info(f"Selecting the first valid REAL lecture card...")
+    # 8. After identifying the real lecture card: click it
+    try:
+        # Evaluate click on the locator's element handle to avoid intersection issues
+        handle = await valid_events[0].element_handle()
+        clickable = await handle.query_selector("a, div")
+        if clickable:
+            await clickable.evaluate("node => node.click()")
+        else:
+            await handle.evaluate("node => node.click()")
+    except Exception as click_err:
+        logger.error(f"Failed to click the lecture card: {click_err}")
+        raise
     
-    await asyncio.sleep(2) # Wait for event details to pop up
+    # 1. Add a stabilization delay
+    await page.wait_for_timeout(3000)
+    
+    # 2. Capture post_click_modal.png and HTML
+    screenshot_post_click = os.path.join(settings.SCREENSHOTS_DIR, "post_click_modal.png")
+    await page.screenshot(path=screenshot_post_click)
+    logger.info(f"Captured post-click modal screenshot at {screenshot_post_click}")
+    
+    # Diagnostics
+    logger.info(f"Post-click current URL: {page.url}")
+    
+    # Find active modals
+    modals = await page.locator("div[role='dialog'], div.modal, .modal-content, .ui-dialog").all()
+    logger.info(f"Detected {len(modals)} visible dialogs/modals.")
+    if modals:
+        modal_html = await modals[0].inner_html()
+        logger.debug(f"Modal HTML Snippet: {modal_html[:2000]}")
+        
+    # Text blocks
+    for kw in ["Join", "join", "class", "lecture", "start"]:
+        blocks = await page.locator(f"text={kw}").all()
+        visible_blocks = [b for b in blocks if await b.is_visible()]
+        logger.info(f"Found {len(visible_blocks)} visible text blocks containing '{kw}'.")
+    
     return True
 
 async def click_join_button(page: Page):
@@ -108,17 +149,45 @@ async def click_join_button(page: Page):
     
     for attempt in range(20): # Try for ~100 seconds
         try:
-            join_btn = await page.query_selector(CalendarSelectors.JOIN_BUTTON)
-            if join_btn and await join_btn.is_visible():
-                logger.info("Join button found! Clicking...")
-                await join_btn.click()
+            # Enumerate all visible buttons after click
+            buttons = await page.locator("button, a.btn, a.joinBtn, div[role='button'], .btn").all()
+            join_candidates = []
+            
+            for i, btn in enumerate(buttons):
+                try:
+                    is_visible = await btn.is_visible()
+                    if not is_visible:
+                        continue
+                    
+                    text = (await btn.inner_text()).strip()
+                    aria = await btn.get_attribute("aria-label") or ""
+                    classes = await btn.get_attribute("class") or ""
+                    
+                    # Log visible buttons on the first attempt
+                    if attempt == 0:
+                        logger.info(f"Visible Button {i} -> Text: '{text}' | Aria: '{aria}' | Classes: '{classes}'")
+                    
+                    # Robust Join button candidate ranking
+                    if "join" in text.lower() or "join" in aria.lower() or "joinBtn" in classes:
+                        join_candidates.append(btn)
+                except:
+                    pass
+            
+            if join_candidates:
+                logger.info(f"Found {len(join_candidates)} potential Join buttons. Prioritizing first visible match.")
+                await join_candidates[0].click(force=True)
+                logger.info("Join button found and clicked!")
                 return True
-        except Exception:
-            pass
+                
+        except Exception as e:
+            logger.warning(f"Error while searching for Join button: {e}")
         
         await asyncio.sleep(5)
         logger.debug(f"Join button not ready (attempt {attempt+1}/20)...")
     
+    screenshot_fail = os.path.join(settings.SCREENSHOTS_DIR, "join_button_search_failure.png")
+    await page.screenshot(path=screenshot_fail)
+    logger.info(f"Captured Join button search failure screenshot at {screenshot_fail}")
     raise Exception("Join button did not appear in time.")
 
 async def handle_meeting_room(page: Page):
@@ -167,6 +236,101 @@ async def handle_meeting_room(page: Page):
     except TimeoutError:
         logger.warning("Echo test button didn't appear. Possibly auto-joined or already in.")
 
+async def analyze_lecture_state(page: Page) -> str:
+    """Analyzes the lecture page to determine its state and logs diagnostics."""
+    logger.info("Analyzing lecture page state...")
+    
+    # Wait a bit for the lecture page to fully render
+    await page.wait_for_load_state("networkidle")
+    await page.wait_for_timeout(3000)
+    
+    # 2. Save lecture_page.html and lecture_state_snapshot.png
+    if not os.path.exists(settings.SCREENSHOTS_DIR):
+        os.makedirs(settings.SCREENSHOTS_DIR)
+        
+    screenshot_path = os.path.join(settings.SCREENSHOTS_DIR, "lecture_state_snapshot.png")
+    await page.screenshot(path=screenshot_path)
+    logger.info(f"Captured lecture state snapshot at {screenshot_path}")
+    
+    html_content = await page.content()
+    html_path = os.path.join(settings.SCREENSHOTS_DIR, "lecture_page.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    logger.info(f"Saved lecture HTML snapshot to {html_path}")
+    
+    # 3. Log all visible buttons/links on lecture page
+    elements = await page.locator("button, a, div[role='button']").all()
+    logger.info(f"Found {len(elements)} potential interactive elements on lecture page.")
+    
+    visible_interactive = []
+    for i, el in enumerate(elements):
+        try:
+            if not await el.is_visible():
+                continue
+            text = (await el.inner_text()).strip()
+            href = await el.get_attribute("href") or ""
+            classes = await el.get_attribute("class") or ""
+            aria = await el.get_attribute("aria-label") or ""
+            is_disabled = await el.is_disabled()
+            
+            logger.info(f"Interactive {i} -> Text: '{text}' | Href: '{href}' | Classes: '{classes}' | Aria: '{aria}' | Disabled: {is_disabled}")
+            visible_interactive.append({"text": text, "disabled": is_disabled, "el": el})
+        except Exception:
+            pass
+            
+    # 4. Explicit detection for state indicators
+    page_text = (await page.inner_text("body")).lower()
+    
+    state = "UNKNOWN"
+    
+    # Check for countdown timer (e.g. 01h 05m)
+    import re
+    h_match = re.search(r'(\d+)\s*h', page_text)
+    m_match = re.search(r'(\d+)\s*m', page_text)
+    s_match = re.search(r'(\d+)\s*s', page_text)
+    
+    has_countdown = bool(h_match or m_match or s_match)
+    
+    if "join not available" in page_text or "not available" in page_text:
+        state = "NOT_YET_AVAILABLE"
+    elif "class not started" in page_text or "not started" in page_text or has_countdown:
+        state = "UPCOMING"
+    elif "completed" in page_text or "ended" in page_text:
+        state = "COMPLETED"
+    else:
+        # Check if there is an active join button
+        join_btn_found = False
+        for item in visible_interactive:
+            if "join" in item["text"].lower() and not item["disabled"]:
+                join_btn_found = True
+                break
+        if join_btn_found:
+            state = "JOINABLE_ACTIVE"
+        else:
+            state = "ACTIVE_NO_JOIN_BTN"
+            
+    logger.info(f"Lecture state determined as: {state}")
+    
+    # Future-ready retry metadata
+    if has_countdown:
+        hours = int(h_match.group(1)) if h_match else 0
+        minutes = int(m_match.group(1)) if m_match else 0
+        seconds = int(s_match.group(1)) if s_match else 0
+        total_seconds = hours * 3600 + minutes * 60 + seconds
+        logger.info(f"Explicit detection: Countdown timer is present ({hours}h {minutes}m {seconds}s).")
+        logger.info(f"Retry recommendation: Schedule next run in ~{max(total_seconds, 60)} seconds.")
+    else:
+        logger.info("Retry recommendation: Default polling interval.")
+
+    if "join not available" in page_text:
+        logger.info("Explicit detection: 'Join not available' text found on the page.")
+    if "class not started" in page_text:
+        logger.info("Explicit detection: 'Class not started' text found on the page.")
+    if "completed" in page_text:
+        logger.info("Explicit detection: 'Completed' text found on the page.")
+        
+    return state
+
 async def join_class_pipeline(page: Page):
     """Orchestrates the entire joining flow."""
     try:
@@ -176,13 +340,22 @@ async def join_class_pipeline(page: Page):
             logger.info("Pipeline finishing gracefully because no active classes exist.")
             return False
         
-        # Handle countdown if present
-        await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)
+        # Analyze lecture state after navigation
+        lecture_state = await analyze_lecture_state(page)
         
-        await click_join_button(page)
-        await handle_meeting_room(page)
-        
-        return True
+        if lecture_state in ["UPCOMING", "NOT_YET_AVAILABLE", "COMPLETED"]:
+            logger.info("Lecture is not currently joinable.")
+            return False
+            
+        if lecture_state == "JOINABLE_ACTIVE":
+            # Handle countdown if present (though unlikely if JOINABLE_ACTIVE, kept for safety)
+            await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)
+            await click_join_button(page)
+            await handle_meeting_room(page)
+            return True
+            
+        logger.warning(f"Lecture state is {lecture_state}. Join button not confirmed. Aborting join sequence.")
+        return False
     except Exception as e:
         logger.error(f"Joining pipeline failed: {str(e)}")
         failure_path = os.path.join(settings.SCREENSHOTS_DIR, "joining_failure.png")
