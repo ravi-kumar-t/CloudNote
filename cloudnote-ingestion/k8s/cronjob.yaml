@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cloudnote-ingestion-worker
+  namespace: cloudnote
+spec:
+  schedule: "0 9 * * *" # Runs daily at 9:00 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: worker
+            image: cloudnote-ingestion:latest # Replace with actual registry image
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: LPU_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: ingestion-secrets
+                  key: LPU_USERNAME
+            - name: LPU_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ingestion-secrets
+                  key: LPU_PASSWORD
+            - name: HEADLESS
+              valueFrom:
+                configMapKeyRef:
+                  name: ingestion-config
+                  key: HEADLESS
+            - name: BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: ingestion-config
+                  key: BASE_URL
+            resources:
+              requests:
+                cpu: "500m"
+                memory: "1Gi"
+              limits:
+                cpu: "1000m"
+                memory: "2Gi"
+            volumeMounts:
+            - name: data-volume
+              mountPath: /app/logs
+              subPath: logs
+            - name: data-volume
+              mountPath: /app/screenshots
+              subPath: screenshots
+          restartPolicy: OnFailure
+          volumes:
+          - name: data-volume
+            persistentVolumeClaim:
+              claimName: ingestion-storage

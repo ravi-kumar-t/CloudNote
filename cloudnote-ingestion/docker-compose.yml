@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  ingestion-worker:
+    build: .
+    container_name: cloudnote-ingestion-worker
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

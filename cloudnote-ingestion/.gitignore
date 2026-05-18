@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# Logs
+logs/
+*.log
+
+# Screenshots
+screenshots/
+*.png
+
+# Browser binaries
+chrome-win64/
+
+# Playwright cache
+ms-playwright/
+
+# OS
+.DS_Store
+Thumbs.db

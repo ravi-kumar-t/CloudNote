@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingestion-config
+  namespace: cloudnote
+data:
+  BASE_URL: "https://myclass.lpu.in/"
+  HEADLESS: "True"
+  LOG_LEVEL: "INFO"
+  BROWSER_TIMEOUT: "60000"

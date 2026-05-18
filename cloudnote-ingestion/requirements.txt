@@ -1,0 +1,4 @@
+playwright==1.49.1
+python-dotenv==1.0.1
+pydantic==2.10.4
+pydantic-settings==2.7.1

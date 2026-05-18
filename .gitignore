@@ -1,0 +1,17 @@
+# Browser binaries
+chrome-win64/
+
+# Python
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# Logs
+logs/
+*.log
+
+# Screenshots
+screenshots/
+*.png
