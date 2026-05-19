@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Testing/Debug
     DEBUG_SLEEP_OVERRIDE_SECONDS: Optional[int] = None
     
+    # Gemini AI & Extraction Settings
+    GEMINI_API_KEY: Optional[str] = None
+    RAW_LECTURE_FILE: str = "logs/raw_lecture.txt"
+    AI_SUMMARY_FILE: str = "logs/ai_summary.json"
+    MAX_BUFFER_LINES: int = 500
+    MAX_REJOIN_ATTEMPTS: int = 3
+
+    
 settings = Settings()
 
 # Ensure directories exist
