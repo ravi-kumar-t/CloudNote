@@ -1,0 +1,14 @@
+[Unit]
+Description=CloudNote Ingestion Playwright Worker
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/cloudnote-ingestion
+ExecStart=/usr/bin/docker compose run --rm ingestion-worker
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

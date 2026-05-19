@@ -1,0 +1,10 @@
+[Unit]
+Description=Trigger CloudNote Ingestion Playwright Worker every 10 minutes during active hours (6 PM - 11 PM IST)
+
+[Timer]
+# Run every 10 minutes during 18:00 - 22:59 IST
+OnCalendar=*-*-* 18..22:0/10:00 Asia/Kolkata
+Persistent=true
+
+[Install]
+WantedBy=timers.target

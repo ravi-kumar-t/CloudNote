@@ -274,7 +274,14 @@ async def analyze_lecture_state(page: Page) -> str:
             is_disabled = await el.is_disabled()
             
             logger.info(f"Interactive {i} -> Text: '{text}' | Href: '{href}' | Classes: '{classes}' | Aria: '{aria}' | Disabled: {is_disabled}")
-            visible_interactive.append({"text": text, "disabled": is_disabled, "el": el})
+            visible_interactive.append({
+                "text": text,
+                "disabled": is_disabled,
+                "el": el,
+                "href": href,
+                "class": classes,
+                "aria": aria
+            })
         except Exception:
             pass
             
@@ -291,36 +298,51 @@ async def analyze_lecture_state(page: Page) -> str:
     
     has_countdown = bool(h_match or m_match or s_match)
     
-    if "join not available" in page_text or "not available" in page_text:
-        state = "NOT_YET_AVAILABLE"
+    # Priority 1: JOINABLE_ACTIVE (visible enabled Join button / jnr.jsp / joinBtn / clickable)
+    join_btn_found = False
+    for item in visible_interactive:
+        text_match = "join" in item["text"].lower()
+        href_match = "jnr.jsp" in item.get("href", "").lower()
+        class_match = "joinbtn" in item.get("class", "").lower()
+        aria_match = "join" in item.get("aria", "").lower()
+        
+        if (text_match or href_match or class_match or aria_match) and not item["disabled"]:
+            join_btn_found = True
+            logger.info(f"Priority 1 Match - Active Join button found: Text='{item['text']}', Href='{item.get('href')}', Class='{item.get('class')}'")
+            break
+            
+    if join_btn_found:
+        state = "JOINABLE_ACTIVE"
+    # Priority 2: UPCOMING (countdown exists, NO active Join button exists)
     elif "class not started" in page_text or "not started" in page_text or has_countdown:
         state = "UPCOMING"
+    # Priority 3: NOT_YET_AVAILABLE (explicit "Join not available" / disabled Join button / no clickable join action)
+    elif "join not available" in page_text or "not available" in page_text:
+        state = "NOT_YET_AVAILABLE"
+    # Priority 4: COMPLETED (completed or ended)
     elif "completed" in page_text or "ended" in page_text:
         state = "COMPLETED"
     else:
-        # Check if there is an active join button
-        join_btn_found = False
-        for item in visible_interactive:
-            if "join" in item["text"].lower() and not item["disabled"]:
-                join_btn_found = True
-                break
-        if join_btn_found:
-            state = "JOINABLE_ACTIVE"
-        else:
-            state = "ACTIVE_NO_JOIN_BTN"
+        state = "UNKNOWN"
             
     logger.info(f"Lecture state determined as: {state}")
     
     # Future-ready retry metadata
+    wait_time = 300
     if has_countdown:
         hours = int(h_match.group(1)) if h_match else 0
         minutes = int(m_match.group(1)) if m_match else 0
         seconds = int(s_match.group(1)) if s_match else 0
         total_seconds = hours * 3600 + minutes * 60 + seconds
+        wait_time = max(total_seconds - 120, 30)
         logger.info(f"Explicit detection: Countdown timer is present ({hours}h {minutes}m {seconds}s).")
-        logger.info(f"Retry recommendation: Schedule next run in ~{max(total_seconds, 60)} seconds.")
+        logger.info(f"Retry recommendation (with wake-up safety buffer): Schedule next run in ~{wait_time} seconds (total countdown: {total_seconds}s).")
     else:
         logger.info("Retry recommendation: Default polling interval.")
+        
+    if settings.DEBUG_SLEEP_OVERRIDE_SECONDS is not None:
+        logger.warning(f"DEBUG OVERRIDE: Forcing sleep duration to {settings.DEBUG_SLEEP_OVERRIDE_SECONDS} seconds.")
+        wait_time = settings.DEBUG_SLEEP_OVERRIDE_SECONDS
 
     if "join not available" in page_text:
         logger.info("Explicit detection: 'Join not available' text found on the page.")
@@ -329,33 +351,101 @@ async def analyze_lecture_state(page: Page) -> str:
     if "completed" in page_text:
         logger.info("Explicit detection: 'Completed' text found on the page.")
         
-    return state
+    return {"state": state, "wait_time": wait_time}
 
 async def join_class_pipeline(page: Page):
-    """Orchestrates the entire joining flow."""
+    """Orchestrates the entire joining flow using a state-machine loop."""
     try:
         await open_calendar(page)
         has_events = await select_latest_event(page)
         if not has_events:
             logger.info("Pipeline finishing gracefully because no active classes exist.")
             return False
-        
-        # Analyze lecture state after navigation
-        lecture_state = await analyze_lecture_state(page)
-        
-        if lecture_state in ["UPCOMING", "NOT_YET_AVAILABLE", "COMPLETED"]:
-            logger.info("Lecture is not currently joinable.")
-            return False
             
-        if lecture_state == "JOINABLE_ACTIVE":
-            # Handle countdown if present (though unlikely if JOINABLE_ACTIVE, kept for safety)
-            await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)
-            await click_join_button(page)
-            await handle_meeting_room(page)
-            return True
+        had_upcoming = False
+        max_iterations = 20
+        for iteration in range(1, max_iterations + 1):
+            logger.info(f"--- Lifecycle Iteration #{iteration} ---")
             
-        logger.warning(f"Lecture state is {lecture_state}. Join button not confirmed. Aborting join sequence.")
+            # Analyze lecture state after navigation or sleep
+            lecture_info = await analyze_lecture_state(page)
+            lecture_state = lecture_info["state"]
+            wait_time = lecture_info["wait_time"]
+            
+            # If we transitioned from UPCOMING but class is not yet joinable, run pre-join polling
+            if had_upcoming and lecture_state not in ["JOINABLE_ACTIVE", "UPCOMING"]:
+                logger.info("Lecture transitioned from UPCOMING but JOINABLE_ACTIVE is not immediately available.")
+                logger.info("Entering pre-join polling mode: polling every 20 seconds for up to 10 minutes...")
+                
+                poll_interval = 20
+                if settings.DEBUG_SLEEP_OVERRIDE_SECONDS is not None:
+                    poll_interval = settings.DEBUG_SLEEP_OVERRIDE_SECONDS
+                    
+                max_poll_duration = 600  # 10 minutes
+                poll_elapsed = 0
+                
+                while poll_elapsed < max_poll_duration:
+                    logger.info(f"Pre-join polling: {poll_elapsed // 60}m {poll_elapsed % 60}s elapsed of {max_poll_duration // 60}m limit...")
+                    
+                    try:
+                        logger.info("Reloading page and re-selecting latest event card to refresh state...")
+                        await page.reload()
+                        await page.wait_for_load_state("networkidle")
+                        has_events = await select_latest_event(page)
+                        if not has_events:
+                            logger.warning("No lecture events found during pre-join polling retry.")
+                    except Exception as reload_err:
+                        logger.warning(f"Failed to reload/re-select event during pre-join polling: {reload_err}")
+                        
+                    lecture_info = await analyze_lecture_state(page)
+                    lecture_state = lecture_info["state"]
+                    
+                    if lecture_state == "JOINABLE_ACTIVE":
+                        logger.info("Pre-join polling: Lecture became JOINABLE_ACTIVE!")
+                        await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)
+                        await click_join_button(page)
+                        await handle_meeting_room(page)
+                        return True
+                    
+                    await asyncio.sleep(poll_interval)
+                    poll_elapsed += poll_interval
+                
+                logger.warning("Pre-join polling timed out after 10 minutes without finding Join button.")
+                return False
+
+            if lecture_state == "JOINABLE_ACTIVE":
+                logger.info("Lecture is JOINABLE_ACTIVE. Proceeding to join sequence...")
+                # Handle countdown if present (though unlikely if JOINABLE_ACTIVE, kept for safety)
+                await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)
+                await click_join_button(page)
+                await handle_meeting_room(page)
+                return True
+                
+            elif lecture_state == "UPCOMING":
+                had_upcoming = True
+                logger.info(f"Lecture is UPCOMING. Sleeping internally for {wait_time} seconds before re-evaluating...")
+                await asyncio.sleep(wait_time)
+                continue
+                
+            elif lecture_state == "COMPLETED":
+                logger.info("Lecture is COMPLETED. Gracefully shutting down.")
+                return False
+                
+            elif lecture_state == "NOT_YET_AVAILABLE":
+                short_retry = 60
+                if settings.DEBUG_SLEEP_OVERRIDE_SECONDS is not None:
+                    short_retry = settings.DEBUG_SLEEP_OVERRIDE_SECONDS
+                logger.info(f"Lecture is NOT_YET_AVAILABLE. Sleeping for short retry interval ({short_retry}s)...")
+                await asyncio.sleep(short_retry)
+                continue
+                
+            else:
+                logger.warning(f"Lecture state is {lecture_state}. Aborting join sequence gracefully.")
+                return False
+                
+        logger.warning(f"Maximum lifecycle iterations ({max_iterations}) reached. Exiting gracefully to prevent infinite loop.")
         return False
+        
     except Exception as e:
         logger.error(f"Joining pipeline failed: {str(e)}")
         failure_path = os.path.join(settings.SCREENSHOTS_DIR, "joining_failure.png")

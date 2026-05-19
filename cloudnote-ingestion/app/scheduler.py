@@ -34,8 +34,9 @@ async def wait_for_countdown(page, countdown_selector: str):
         total_seconds = hours * 3600 + minutes * 60 + seconds
 
         if total_seconds > 0:
-            logger.info(f"Waiting for {total_seconds} seconds until class starts...")
-            await asyncio.sleep(total_seconds + 5) # Buffer
+            wait_time = max(total_seconds - 120, 30)
+            logger.info(f"Waiting for {wait_time} seconds (wake-up safety buffer applied; total countdown: {total_seconds}s) until class starts...")
+            await asyncio.sleep(wait_time)
         else:
             logger.info("Class is ready to join.")
 
