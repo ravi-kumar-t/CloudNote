@@ -1,18 +1,54 @@
 version: '3.8'
 
 services:
-  ingestion-worker:
-    build: .
-    container_name: cloudnote-ingestion-worker
-    init: true
-    env_file: .env
-    volumes:
-      - ./logs:/app/logs
-      - ./screenshots:/app/screenshots
+  # 1. 24/7 Persistent FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cloudnote-backend
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000" # Securely bind to localhost only (routed via Nginx)
+    volumes:
+      - ./logs:/app/logs # Persistent shared SQLite storage
+    environment:
+      - DB_PATH=/app/logs/cloudnote.db
+      - PYTHONUNBUFFERED=1
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
+  # 2. 24/7 Persistent React Frontend Client
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: cloudnote-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80" # Securely bind to localhost only (routed via Nginx)
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # 3. On-Demand Playwright Ingestion Worker (triggered by Systemd Timer)
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cloudnote-ingestion-worker
+    init: true # Spawns tini (PID 1) to safely reap zombie Chromium/Playwright processes
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs # Persistent shared SQLite storage
+      - ./screenshots:/app/screenshots # Persistent screenshots for diagnostic captures
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

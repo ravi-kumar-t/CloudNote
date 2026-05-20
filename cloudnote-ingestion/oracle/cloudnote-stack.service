@@ -1,0 +1,16 @@
+[Unit]
+Description=CloudNote 24/7 Web Dashboard Stack (Backend + Frontend)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cloudnote-ingestion
+ExecStart=/usr/bin/docker compose up backend frontend
+ExecStop=/usr/bin/docker compose down
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
