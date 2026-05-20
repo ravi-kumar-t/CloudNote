@@ -118,5 +118,13 @@ def save_summary_to_disk(summary_data: dict):
             json.dump(summary_data, f, indent=2)
             
         logger.info(f"Gemini Service: Saved persistent AI summary to {settings.AI_SUMMARY_FILE} and {timestamped_file}")
+        
+        # Persist summary to SQLite DB under LPU_USERNAME
+        try:
+            from .database import save_summary_to_db
+            save_summary_to_db(settings.LPU_USERNAME, summary_data)
+        except Exception as db_err:
+            logger.error(f"Gemini Service: Failed to integrate SQLite DB summary insertion: {db_err}")
+            
     except Exception as save_err:
         logger.error(f"Gemini Service: Failed to persist AI summary outputs: {save_err}")
