@@ -51,12 +51,12 @@ def parse_event_card(text_content: str) -> dict:
             faculty = " / ".join(cleaned_names)
             continue
 
-        # Look for subject code (e.g. CSE326, MTH102)
-        code_match = re.search(r'\b([A-Z]{3,4}\d{3,4})\b', line)
+        # Look for subject code (e.g. CSE326, CSE 326, CSES009)
+        code_match = re.search(r'\b([A-Z]{2,4})[\s-]?(\d{3,4})\b', line, re.IGNORECASE)
         if code_match:
-            subject_code = code_match.group(1)
+            subject_code = f"{code_match.group(1).upper()}{code_match.group(2)}"
             # Extracted name is the rest of the line stripped
-            name_part = line.replace(subject_code, "").strip(" :-\t")
+            name_part = re.sub(r'\b[A-Z]{2,4}[\s-]?\d{3,4}\b', '', line, flags=re.IGNORECASE).strip(" :-\t")
             if name_part and "lecture" not in name_part.lower():
                 subject_name = name_part
             continue
@@ -73,10 +73,10 @@ def parse_event_card(text_content: str) -> dict:
     # Fallback default values
     if not subject_code and lines:
         first_line = lines[0]
-        code_match = re.search(r'\b([A-Z]{3,4}\d{3,4})\b', first_line)
+        code_match = re.search(r'\b([A-Z]{2,4})[\s-]?(\d{3,4})\b', first_line, re.IGNORECASE)
         if code_match:
-            subject_code = code_match.group(1)
-            subject_name = first_line.replace(subject_code, "").strip(" :-\t")
+            subject_code = f"{code_match.group(1).upper()}{code_match.group(2)}"
+            subject_name = re.sub(r'\b[A-Z]{2,4}[\s-]?\d{3,4}\b', '', first_line, flags=re.IGNORECASE).strip(" :-\t")
 
     if not subject_name and subject_code:
         subject_name = subject_mappings.get(subject_code, f"{subject_code} Lecture")

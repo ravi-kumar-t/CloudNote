@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LogOut, BookOpen, Search, FileText, Calendar, Compass, ListChecks, HelpCircle, X } from 'lucide-react';
 import './App.css';
 
-const API_BASE = 'http://80.225.202.140:8000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');

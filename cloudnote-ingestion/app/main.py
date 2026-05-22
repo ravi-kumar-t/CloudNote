@@ -4,7 +4,7 @@ import json
 from playwright.async_api import async_playwright
 from .config import settings
 from .logger import logger
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date, time
 import sys
 from .extractor import LectureExtractor
 
