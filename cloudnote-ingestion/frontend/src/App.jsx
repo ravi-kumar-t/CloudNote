@@ -25,7 +25,6 @@ function App() {
   const [dashboardError, setDashboardError] = useState('');
   const [ingestionStatus, setIngestionStatus] = useState(null);
   const [timetable, setTimetable] = useState([]);
-  const [isSyncing, setIsSyncing] = useState(false);
 
   // Timetable Fetching
   const fetchTimetable = async (authToken) => {
@@ -41,27 +40,6 @@ function App() {
       }
     } catch (err) {
       console.error('Failed to fetch timetable:', err);
-    }
-  };
-
-  // Timetable Sync
-  const triggerSync = async () => {
-    if (!token || isSyncing) return;
-    setIsSyncing(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/timetable/sync`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      if (res.ok) {
-        setTimeout(() => fetchTimetable(token), 3000);
-      }
-    } catch (err) {
-      console.error('Failed to trigger manual sync:', err);
-    } finally {
-      setTimeout(() => setIsSyncing(false), 5000);
     }
   };
 
@@ -330,19 +308,12 @@ function App() {
                 <Calendar size={22} color="#a855f7" />
                 <h2>Today's Class Schedule</h2>
               </div>
-              <button 
-                className={`btn-sync ${isSyncing || (ingestionStatus && ingestionStatus.details && ingestionStatus.details.toLowerCase().includes('sync')) ? 'syncing' : ''}`}
-                onClick={triggerSync}
-                disabled={isSyncing || (ingestionStatus && ingestionStatus.status === 'processing' && !ingestionStatus.details.toLowerCase().includes('sync'))}
-              >
-                {isSyncing || (ingestionStatus && ingestionStatus.details && ingestionStatus.details.toLowerCase().includes('sync')) ? 'Syncing...' : 'Sync Schedule'}
-              </button>
             </div>
             
             {timetable.length === 0 ? (
               <div className="timetable-empty">
-                <p>No classes scheduled for today, or timetable not synced yet.</p>
-                <p className="timetable-empty-sub">Click "Sync Schedule" to perform a headless session scan.</p>
+                <p>No classes scheduled for today.</p>
+                <p className="timetable-empty-sub">Schedules are automatically fetched and updated by the background intelligence loop.</p>
               </div>
             ) : (
               <div className="timetable-grid">

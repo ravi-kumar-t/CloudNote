@@ -71,24 +71,6 @@ async def fetch_timetable_data(page: Page) -> list:
     # Step A: Extract Today's classes
     today = date.today()
     await extract_visible_cards(today)
-    
-    # Step B: Extract Tomorrow's classes for rollover safety
-    try:
-        next_button = page.locator("button.fc-next-button, .fc-button-next, button:has(span.fc-icon-right-single-arrow), button:has-text('Next')").first
-        if await next_button.count() > 0 and await next_button.is_visible():
-            logger.info("Timetable Scraper: Navigating to Tomorrow's schedule...")
-            await next_button.click()
-            await page.wait_for_timeout(1000)
-            tomorrow = today + timedelta(days=1)
-            await extract_visible_cards(tomorrow)
-            
-            # Navigate back to Today for UI state continuity
-            prev_button = page.locator("button.fc-prev-button, .fc-button-prev, button:has(span.fc-icon-left-single-arrow), button:has-text('Prev')").first
-            if await prev_button.count() > 0 and await prev_button.is_visible():
-                await prev_button.click()
-                await page.wait_for_timeout(1000)
-    except Exception as nav_e:
-        logger.debug(f"Timetable Scraper: Could not navigate to tomorrow's schedule: {nav_e}")
         
     logger.info(f"Timetable Scraper: Extraction complete. Collected {len(classes)} unique classes.")
     return classes
