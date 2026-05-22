@@ -173,6 +173,17 @@ class LectureExtractor:
                 f"Buffer Size: {len(self.buffer)}"
             )
             
+            # Structured JSON log for extraction success
+            structured_payload = {
+                "event": "extraction_success",
+                "blocks_found": total_blocks_found,
+                "extracted_characters": extracted_chars,
+                "new_unique_lines": new_lines_captured,
+                "buffer_size": len(self.buffer),
+                "timestamp": datetime.now().isoformat()
+            }
+            logger.info(f"[STRUCTURED] {json.dumps(structured_payload)}")
+            
             # 8. Persist raw lecture lines
             if new_lines_captured > 0:
                 await self.save_to_disk()

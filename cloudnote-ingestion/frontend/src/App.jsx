@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LogOut, BookOpen, Search, FileText, Calendar, Compass, ListChecks, HelpCircle, X } from 'lucide-react';
 import './App.css';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = 'http://80.225.202.140:8000';
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
@@ -23,6 +23,7 @@ function App() {
   const [selectedSummary, setSelectedSummary] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [dashboardError, setDashboardError] = useState('');
+  const [ingestionStatus, setIngestionStatus] = useState(null);
 
   // Synchronize token state
   useEffect(() => {
@@ -119,6 +120,34 @@ function App() {
       setDashboardError(err.message);
     }
   };
+
+  // Live Ingestion Status Fetching
+  const fetchIngestionStatus = async (authToken) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/ingestion/status`, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIngestionStatus(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch ingestion status:', err);
+    }
+  };
+
+  // Poll Ingestion Status
+  useEffect(() => {
+    if (token) {
+      fetchIngestionStatus(token);
+      const interval = setInterval(() => {
+        fetchIngestionStatus(token);
+      }, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [token]);
 
   // Search Filter
   const filteredSummaries = summaries.filter(s => {
@@ -232,6 +261,24 @@ function App() {
               <p>Review active summaries auto-ingested from your live CodeTantra classes.</p>
             </div>
           </div>
+
+          {/* Active Ingestion Status Banner */}
+          {ingestionStatus && (
+            <div className={`ingestion-status-banner glass-panel ${ingestionStatus.status}`}>
+              <div className="status-info">
+                <span className={`status-pulse-dot ${ingestionStatus.status}`}></span>
+                <strong style={{ textTransform: 'capitalize' }}>
+                  Bot State: {ingestionStatus.status === 'processing' ? 'Active Ingestion' : ingestionStatus.status}
+                </strong>
+                {ingestionStatus.details && <span className="status-details"> — {ingestionStatus.details}</span>}
+                {ingestionStatus.subject && <span className="status-subject"> [{ingestionStatus.subject}]</span>}
+                {ingestionStatus.error && <span className="status-error-txt"> ({ingestionStatus.error})</span>}
+              </div>
+              <div className="status-time">
+                <span className="status-timestamp">Last Active: {ingestionStatus.timestamp}</span>
+              </div>
+            </div>
+          )}
 
           {/* Controls Bar */}
           <div className="filter-bar">

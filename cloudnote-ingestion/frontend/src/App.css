@@ -509,3 +509,113 @@
     transform: translateY(0);
   }
 }
+
+/* Ingestion Status Banner */
+.ingestion-status-banner {
+  padding: 1rem 1.5rem;
+  margin-bottom: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: all 0.3s ease;
+  font-size: 0.925rem;
+  gap: 1rem;
+}
+
+.ingestion-status-banner.idle {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+.ingestion-status-banner.processing {
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  color: #e9d5ff;
+  box-shadow: 0 4px 20px rgba(168, 85, 247, 0.1);
+}
+
+.ingestion-status-banner.completed {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  color: #cbd5e1;
+}
+
+.ingestion-status-banner.failed {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.status-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.status-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 0.25rem;
+  flex-shrink: 0;
+}
+
+.status-pulse-dot.idle {
+  background-color: #94a3b8;
+  box-shadow: 0 0 8px #94a3b8;
+}
+
+.status-pulse-dot.processing {
+  background-color: #a855f7;
+  box-shadow: 0 0 10px #a855f7;
+  animation: status-pulse-animation 2s infinite ease-in-out;
+}
+
+.status-pulse-dot.completed {
+  background-color: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+.status-pulse-dot.failed {
+  background-color: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+  animation: status-pulse-animation 1s infinite ease-in-out;
+}
+
+.status-details {
+  color: #cbd5e1;
+}
+
+.status-subject {
+  color: #a855f7;
+  font-weight: 600;
+}
+
+.status-error-txt {
+  color: #fca5a5;
+  font-size: 0.85rem;
+}
+
+.status-timestamp {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+@keyframes status-pulse-animation {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+    box-shadow: 0 0 12px currentColor;
+  }
+  100% {
+    transform: scale(0.9);
+    opacity: 0.6;
+  }
+}

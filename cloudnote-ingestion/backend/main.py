@@ -166,6 +166,27 @@ def login_user(credentials: UserLogin):
             detail=f"Authentication core error: {e}"
         )
 
+# Ingestion status endpoint
+@app.get("/api/ingestion/status")
+def get_ingestion_status(current_user: dict = Depends(get_current_user)):
+    """Retrieves the active ingestion state of the Playwright bot."""
+    status_file = "logs/ingestion_status.json"
+    if not os.path.exists(status_file):
+        return {
+            "status": "idle",
+            "details": "No active scraper processes registered yet.",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read ingestion status snapshot: {e}"
+        )
+
 # 3. Retrieve all summaries scoped to the authenticated user
 @app.get("/api/summaries", response_model=List[LectureSummaryResponse])
 def get_user_summaries(current_user: dict = Depends(get_current_user)):

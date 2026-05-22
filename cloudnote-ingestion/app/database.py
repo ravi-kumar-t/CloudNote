@@ -84,9 +84,10 @@ def get_or_create_ingestion_user(username: str) -> int:
         logger.error(f"Database: Failed to get/create student account: {e}")
         return 1 # Fallback to user ID 1
 
-def save_summary_to_db(username: str, summary_data: dict):
+def save_summary_to_db(username: str, summary_data: dict) -> int:
     """
     Persists a generated Gemini lecture summary into SQLite under the active user account.
+    Returns the newly inserted summary row ID.
     """
     try:
         user_id = get_or_create_ingestion_user(username)
@@ -95,7 +96,7 @@ def save_summary_to_db(username: str, summary_data: dict):
         cursor = conn.cursor()
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        subject = "Ingested Lecture"
+        subject = summary_data.get("subject", "Ingested Lecture")
         summary = summary_data.get("summary", "No summary text generated.")
         
         # Serialize arrays to JSON strings
@@ -107,11 +108,49 @@ def save_summary_to_db(username: str, summary_data: dict):
             VALUES (?, ?, ?, ?, ?, ?)
         """, (user_id, timestamp, subject, summary, topics_json, key_points_json))
         
+        row_id = cursor.lastrowid
         conn.commit()
         conn.close()
-        logger.info(f"Database: Successfully saved summary in DB under User ID {user_id}.")
+        
+        # Structured log for DB write success
+        structured_payload = {
+            "event": "db_write_success",
+            "username": username,
+            "user_id": user_id,
+            "row_id": row_id,
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.info(f"[STRUCTURED] {json.dumps(structured_payload)}")
+        return row_id
     except Exception as db_err:
-        logger.error(f"Database: Failed to save summary to SQLite: {db_err}")
+        # Structured log for DB write failure
+        structured_payload = {
+            "event": "db_write_failed",
+            "username": username,
+            "error": str(db_err),
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.error(f"[STRUCTURED] {json.dumps(structured_payload)}")
+        raise db_err
+
+def update_ingestion_status(status: str, details: str = "", subject: str = "", error: str = ""):
+    """Updates logs/ingestion_status.json with the current worker state."""
+    status_file = "logs/ingestion_status.json"
+    os.makedirs(os.path.dirname(status_file), exist_ok=True)
+    
+    data = {
+        "status": status,
+        "details": details,
+        "subject": subject,
+        "error": error,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    try:
+        with open(status_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to update ingestion status file: {e}")
 
 # Auto-initialize database when module loaded
 init_db()
