@@ -9,9 +9,15 @@ from .scheduler import wait_for_countdown
 async def open_calendar(page: Page):
     """Navigates to the class calendar."""
     logger.info("Opening class calendar...")
-    await page.wait_for_selector(CalendarSelectors.VIEW_CLASSES_BUTTON)
-    await page.click(CalendarSelectors.VIEW_CLASSES_BUTTON)
-    await page.wait_for_load_state("networkidle")
+    try:
+        view_classes_btn = page.locator(CalendarSelectors.VIEW_CLASSES_BUTTON)
+        # Using a short timeout to prevent blocking when the button is absent in the new UI
+        await view_classes_btn.wait_for(state="visible", timeout=5000)
+        logger.info("Clicking 'View Classes' button to navigate to calendar...")
+        await view_classes_btn.click()
+        await page.wait_for_load_state("networkidle")
+    except (TimeoutError, Exception) as e:
+        logger.info(f"'View Classes' button not found or not visible: {e}. Assuming we are already on the calendar dashboard and proceeding.")
 
 async def select_latest_event(page: Page):
     """Finds and clicks the most recent class event."""
@@ -356,12 +362,8 @@ async def analyze_lecture_state(page: Page) -> str:
 async def join_class_pipeline(page: Page):
     """Orchestrates the entire joining flow using a state-machine loop."""
     try:
-        await open_calendar(page)
-        has_events = await select_latest_event(page)
-        if not has_events:
-            logger.info("Pipeline finishing gracefully because no active classes exist.")
-            return False
-            
+        # Note: At the start of the joining pipeline, the browser is already on the lecture page (mi.jsp)
+        # after select_latest_event has been executed. No need to reload calendar or search events here.
         had_upcoming = False
         max_iterations = 20
         for iteration in range(1, max_iterations + 1):
@@ -388,14 +390,17 @@ async def join_class_pipeline(page: Page):
                     logger.info(f"Pre-join polling: {poll_elapsed // 60}m {poll_elapsed % 60}s elapsed of {max_poll_duration // 60}m limit...")
                     
                     try:
-                        logger.info("Reloading page and re-selecting latest event card to refresh state...")
+                        logger.info("Reloading active lecture page to refresh state...")
                         await page.reload()
                         await page.wait_for_load_state("networkidle")
-                        has_events = await select_latest_event(page)
-                        if not has_events:
-                            logger.warning("No lecture events found during pre-join polling retry.")
+                        
+                        # Fallback recovery: if we somehow got redirected away from the lecture page
+                        if "mi.jsp" not in page.url:
+                            logger.info("Redirect detected. Re-navigating to lecture page via calendar...")
+                            await open_calendar(page)
+                            await select_latest_event(page)
                     except Exception as reload_err:
-                        logger.warning(f"Failed to reload/re-select event during pre-join polling: {reload_err}")
+                        logger.warning(f"Failed to refresh active page state: {reload_err}")
                         
                     lecture_info = await analyze_lecture_state(page)
                     lecture_state = lecture_info["state"]

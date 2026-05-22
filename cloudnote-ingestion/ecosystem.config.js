@@ -2,10 +2,10 @@ module.exports = {
   apps: [
     {
       name: 'cloudnote-ingestion',
-      script: '-m',
-      args: 'app.main',
-      interpreter: 'python3',
-      cwd: '/opt/cloudnote-ingestion',
+      script: 'python3',
+      args: '-m app.main',
+      interpreter: 'none',
+      cwd: '.',
       env: {
         PYTHONUNBUFFERED: '1',
         LOG_LEVEL: 'INFO'
