@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     
     # Testing/Debug
     DEBUG_SLEEP_OVERRIDE_SECONDS: Optional[int] = None
+    DEBUG_MODE: bool = False
     
     # Gemini AI & Extraction Settings
     GEMINI_API_KEY: Optional[str] = None
