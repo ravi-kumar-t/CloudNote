@@ -24,12 +24,53 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [dashboardError, setDashboardError] = useState('');
   const [ingestionStatus, setIngestionStatus] = useState(null);
+  const [timetable, setTimetable] = useState([]);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  // Timetable Fetching
+  const fetchTimetable = async (authToken) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/timetable`, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTimetable(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch timetable:', err);
+    }
+  };
+
+  // Timetable Sync
+  const triggerSync = async () => {
+    if (!token || isSyncing) return;
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/timetable/sync`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (res.ok) {
+        setTimeout(() => fetchTimetable(token), 3000);
+      }
+    } catch (err) {
+      console.error('Failed to trigger manual sync:', err);
+    } finally {
+      setTimeout(() => setIsSyncing(false), 5000);
+    }
+  };
 
   // Synchronize token state
   useEffect(() => {
     if (token) {
       setView('dashboard');
       fetchSummaries(token);
+      fetchTimetable(token);
     } else {
       setView('auth');
     }
@@ -138,12 +179,14 @@ function App() {
     }
   };
 
-  // Poll Ingestion Status
+  // Poll Ingestion Status & Timetable
   useEffect(() => {
     if (token) {
       fetchIngestionStatus(token);
+      fetchTimetable(token);
       const interval = setInterval(() => {
         fetchIngestionStatus(token);
+        fetchTimetable(token);
       }, 10000);
       return () => clearInterval(interval);
     }
@@ -279,6 +322,48 @@ function App() {
               </div>
             </div>
           )}
+
+          {/* Timetable Monitor Widget */}
+          <div className="timetable-section glass-panel">
+            <div className="timetable-header">
+              <div className="timetable-title">
+                <Calendar size={22} color="#a855f7" />
+                <h2>Today's Class Schedule</h2>
+              </div>
+              <button 
+                className={`btn-sync ${isSyncing || (ingestionStatus && ingestionStatus.details && ingestionStatus.details.toLowerCase().includes('sync')) ? 'syncing' : ''}`}
+                onClick={triggerSync}
+                disabled={isSyncing || (ingestionStatus && ingestionStatus.status === 'processing' && !ingestionStatus.details.toLowerCase().includes('sync'))}
+              >
+                {isSyncing || (ingestionStatus && ingestionStatus.details && ingestionStatus.details.toLowerCase().includes('sync')) ? 'Syncing...' : 'Sync Schedule'}
+              </button>
+            </div>
+            
+            {timetable.length === 0 ? (
+              <div className="timetable-empty">
+                <p>No classes scheduled for today, or timetable not synced yet.</p>
+                <p className="timetable-empty-sub">Click "Sync Schedule" to perform a headless session scan.</p>
+              </div>
+            ) : (
+              <div className="timetable-grid">
+                {timetable.map((c) => (
+                  <div key={c.key} className={`timetable-card ${c.status.toLowerCase()}`}>
+                    <div className="card-badge-row">
+                      <span className="subject-code-badge">{c.subject_code}</span>
+                      <span className={`status-badge ${c.status.toLowerCase()}`}>
+                        {c.status.replace('_', ' ')}
+                      </span>
+                    </div>
+                    <h3 className="subject-name">{c.subject_name}</h3>
+                    <p className="faculty-name">Instructor: {c.faculty}</p>
+                    <div className="class-timing-row">
+                      <span className="time-display">{c.timings}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Controls Bar */}
           <div className="filter-bar">

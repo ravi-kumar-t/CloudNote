@@ -20,7 +20,12 @@ app = FastAPI(title="CloudNote API", version="1.0.0")
 # Enable CORS for React dashboard access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify React's dev/prod origins
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://80.225.202.140:3000",
+        "http://80.225.202.140",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,8 +36,8 @@ JWT_SECRET = "cloudnote_premium_jwt_secret_key_888"
 JWT_ALGORITHM = "HS256"
 SALT = b"cloudnote_secure_hash_salt_999"
 
-# Security utilities
-security = HTTPBearer()
+# Security utilities (disabling generic auto-error to prevent raw 403 blocks)
+security = HTTPBearer(auto_error=False)
 
 def hash_password(password: str) -> str:
     """Zero-dependency PBKDF2 secure password hashing."""
@@ -47,8 +52,13 @@ def create_access_token(username: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
     """Dependency injection to authenticate and inject the active user context."""
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: Authorization header missing or malformed."
+        )
     token = credentials.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -185,6 +195,70 @@ def get_ingestion_status(current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read ingestion status snapshot: {e}"
+        )
+
+# Get cached timetable endpoint
+@app.get("/api/timetable")
+def get_timetable(current_user: dict = Depends(get_current_user)):
+    """Retrieves today's class schedule details from cache."""
+    # Resolve path absolutely relative to backend file's parent folder
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_file = os.path.abspath(os.path.join(backend_dir, "..", "logs", "timetable_cache.json"))
+    
+    print(f"[DEBUG] Timetable Endpoint Request by user: {current_user.get('username')}")
+    print(f"[DEBUG] Resolved cache file path: {cache_file}")
+    
+    if not os.path.exists(cache_file):
+        print(f"[DEBUG] Timetable cache file does NOT exist at: {cache_file}")
+        return []
+        
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        from datetime import timezone, timedelta
+        # Compute dates in UTC, IST (UTC+5:30), and server-local
+        IST = timezone(timedelta(hours=5, minutes=30))
+        today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_local = datetime.now().strftime("%Y-%m-%d")
+        
+        cache_date = data.get("date")
+        classes = data.get("classes", [])
+        
+        print(f"[DEBUG] Cache Date: {cache_date}")
+        print(f"[DEBUG] Calculated Dates - IST: {today_ist}, UTC: {today_utc}, Local: {today_local}")
+        print(f"[DEBUG] Total classes loaded from cache file: {len(classes)}")
+        
+        # Resilient match against IST, UTC, or Server-local dates
+        if cache_date not in (today_ist, today_utc, today_local):
+            print(f"[DEBUG] Date mismatch! Stale cache date '{cache_date}' does not match today.")
+            return []
+            
+        print("[DEBUG] Date match successful. Returning cached class array.")
+        return classes
+    except Exception as e:
+        print(f"[DEBUG] Failed to read or parse timetable cache: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read timetable cache: {e}"
+        )
+
+# Trigger manual timetable sync endpoint
+@app.post("/api/timetable/sync")
+def sync_timetable(current_user: dict = Depends(get_current_user)):
+    """Triggers an on-demand sync request for the ingestion worker."""
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    sync_file = os.path.abspath(os.path.join(backend_dir, "..", "logs", "sync_request.json"))
+    try:
+        os.makedirs(os.path.dirname(sync_file), exist_ok=True)
+        with open(sync_file, "w", encoding="utf-8") as f:
+            json.dump({"sync_requested": True}, f)
+        return {"status": "sync_requested", "message": "Manual sync successfully queued."}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to queue sync request: {e}"
         )
 
 # 3. Retrieve all summaries scoped to the authenticated user
