@@ -42,11 +42,15 @@ class TimetableCache:
         except Exception as e:
             logger.error(f"Cache: Failed to save to disk: {e}")
 
+    def is_valid_for_today(self) -> bool:
+        """Checks if the cached data is fresh and corresponds to today's date."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        return self.last_fetch_date == today_str
+
     def get_timetable(self):
         """Returns the cached timetable if it is valid for today, otherwise returns empty list."""
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        if self.last_fetch_date != today_str:
-            logger.info(f"Cache: Data is stale or missing (last fetched: {self.last_fetch_date}, today: {today_str}).")
+        if not self.is_valid_for_today():
+            logger.info(f"Cache: Data is stale or missing (last fetched: {self.last_fetch_date}, today: {datetime.now().strftime('%Y-%m-%d')}).")
             return []
         return self.classes
 

@@ -254,11 +254,12 @@ async def run_ingestion():
     
     while True:
         # Check cache state
+        cache_valid = timetable_cache.is_valid_for_today()
         classes = timetable_cache.get_timetable()
         sync_requested = timetable_cache.is_sync_requested()
         
         # If cache is missing, stale, or sync is manually requested, run a Headless Unified Fetch
-        if not classes or sync_requested:
+        if not cache_valid or sync_requested:
             logger.info("Unified Loop: Timetable cache is stale, missing, or sync was requested. Performing headless sync...")
             update_ingestion_status("processing", details="Performing headless timetable sync session")
             
@@ -496,7 +497,7 @@ async def run_ingestion():
             target_time = asyncio.get_event_loop().time() + sleep_duration
             while asyncio.get_event_loop().time() < target_time:
                 # Check for calendar date rollovers or manual sync requests
-                if timetable_cache.is_sync_requested() or timetable_cache.get_timetable() == []:
+                if timetable_cache.is_sync_requested() or not timetable_cache.is_valid_for_today():
                     logger.info("Unified Loop: Sleep interrupted by sync request or date rollover. Waking up!")
                     break
                 await asyncio.sleep(10)
@@ -512,7 +513,7 @@ async def run_ingestion():
             
             target_time = asyncio.get_event_loop().time() + sleep_duration
             while asyncio.get_event_loop().time() < target_time:
-                if timetable_cache.is_sync_requested() or timetable_cache.get_timetable() == []:
+                if timetable_cache.is_sync_requested() or not timetable_cache.is_valid_for_today():
                     logger.info("Unified Loop: Sleep interrupted by sync request or date rollover. Waking up!")
                     break
                 await asyncio.sleep(10)
