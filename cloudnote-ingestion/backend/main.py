@@ -28,6 +28,7 @@ app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshot
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://80.225.202.140:5173",
         "http://localhost:5173",
         "http://localhost:3000",
         "http://80.225.202.140:3000",
