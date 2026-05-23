@@ -25,6 +25,8 @@ function App() {
   const [dashboardError, setDashboardError] = useState('');
   const [ingestionStatus, setIngestionStatus] = useState(null);
   const [timetable, setTimetable] = useState([]);
+  const [sessionStatus, setSessionStatus] = useState(null);
+  const [showScreenshot, setShowScreenshot] = useState(false);
 
   // Timetable Fetching
   const fetchTimetable = async (authToken) => {
@@ -49,6 +51,7 @@ function App() {
       setView('dashboard');
       fetchSummaries(token);
       fetchTimetable(token);
+      fetchSessionStatus(token);
     } else {
       setView('auth');
     }
@@ -157,13 +160,32 @@ function App() {
     }
   };
 
+  // Live Session Status Fetching (screenshots)
+  const fetchSessionStatus = async (authToken) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/session-status`, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSessionStatus(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch session status:', err);
+    }
+  };
+
   // Poll Ingestion Status & Timetable
   useEffect(() => {
     if (token) {
       fetchIngestionStatus(token);
+      fetchSessionStatus(token);
       fetchTimetable(token);
       const interval = setInterval(() => {
         fetchIngestionStatus(token);
+        fetchSessionStatus(token);
         fetchTimetable(token);
       }, 10000);
       return () => clearInterval(interval);
@@ -335,6 +357,113 @@ function App() {
               </div>
             )}
           </div>
+
+          {/* Live Validation Screenshot Monitoring */}
+          {sessionStatus && (
+            <div className="session-status-card glass-panel">
+              <div className="session-status-info">
+                {(() => {
+                  switch (sessionStatus.status) {
+                    case 'CONNECTED':
+                      return (
+                        <>
+                          <span className="status-indicator connected">
+                            <span className="pulse-circle connected"></span>
+                            🟢 Connected to Class
+                          </span>
+                          <span className="status-time-lbl">
+                            Last joined: <strong>{sessionStatus.last_join_time ? new Date(sessionStatus.last_join_time.replace(/-/g, '/')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}</strong>
+                          </span>
+                        </>
+                      );
+                    case 'CONNECTING':
+                      return (
+                        <>
+                          <span className="status-indicator connecting">
+                            <span className="pulse-circle connecting"></span>
+                            🟡 Connecting to Class...
+                          </span>
+                          <span className="status-time-lbl">
+                            Initializing classroom session
+                          </span>
+                        </>
+                      );
+                    case 'RECOVERING':
+                      return (
+                        <>
+                          <span className="status-indicator recovering">
+                            <span className="pulse-circle recovering"></span>
+                            🟠 Recovering Connection...
+                          </span>
+                          <span className="status-time-lbl">
+                            Executing automated reconnection watchdog
+                          </span>
+                        </>
+                      );
+                    case 'DISCONNECTED':
+                      return (
+                        <>
+                          <span className="status-indicator disconnected">
+                            <span className="pulse-circle disconnected"></span>
+                            🔴 Disconnected
+                          </span>
+                          <span className="status-time-lbl">
+                            {sessionStatus.disconnect_time ? (
+                              <>Disconnected at: <strong>{new Date(sessionStatus.disconnect_time.replace(/-/g, '/')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong></>
+                            ) : (
+                              'No active session currently connected.'
+                            )}
+                          </span>
+                        </>
+                      );
+                    case 'IDLE':
+                    default:
+                      return (
+                        <>
+                          <span className="status-indicator idle">
+                            <span className="pulse-circle idle"></span>
+                            🟣 Standby / Idle
+                          </span>
+                          <span className="status-time-lbl">
+                            Background worker monitoring schedule
+                          </span>
+                        </>
+                      );
+                  }
+                })()}
+              </div>
+              
+              {sessionStatus.screenshot && (
+                <button className="btn-view-screenshot" onClick={() => setShowScreenshot(true)}>
+                  [View Screenshot]
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Screenshot Modal Viewer */}
+          {showScreenshot && sessionStatus?.screenshot && (
+            <div className="modal-overlay" onClick={() => setShowScreenshot(false)}>
+              <div className="screenshot-modal-content glass-panel" onClick={(e) => e.stopPropagation()}>
+                <button className="btn-close" onClick={() => setShowScreenshot(false)}>
+                  <X size={20} />
+                </button>
+                <h3 className="screenshot-modal-title">
+                  {sessionStatus.status === 'CONNECTED' ? '🟢 Join Success Validation Screenshot' : '🔴 Disconnect Validation Screenshot'}
+                </h3>
+                <p className="screenshot-modal-meta">
+                  Timestamp: {sessionStatus.status === 'CONNECTED' ? sessionStatus.last_join_time : sessionStatus.disconnect_time}
+                </p>
+                <div className="screenshot-image-container">
+                  <img 
+                    src={`${API_BASE}/screenshots/${sessionStatus.screenshot}`} 
+                    alt="Validation Screenshot" 
+                    className="validation-screenshot-img"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Controls Bar */}
           <div className="filter-bar">
