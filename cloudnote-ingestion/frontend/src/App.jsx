@@ -27,6 +27,7 @@ function App() {
   const [timetable, setTimetable] = useState([]);
   const [sessionStatus, setSessionStatus] = useState(null);
   const [showScreenshot, setShowScreenshot] = useState(false);
+  const [modalScreenshot, setModalScreenshot] = useState(null);
 
   // Timetable Fetching
   const fetchTimetable = async (authToken) => {
@@ -434,29 +435,107 @@ function App() {
               </div>
               
               {sessionStatus.screenshot && (
-                <button className="btn-view-screenshot" onClick={() => setShowScreenshot(true)}>
+                <button 
+                  className="btn-view-screenshot" 
+                  onClick={() => setModalScreenshot({
+                    title: sessionStatus.status === 'CONNECTED' ? '🟢 Join Success Validation Screenshot' : '🔴 Disconnect Validation Screenshot',
+                    meta: `Timestamp: ${sessionStatus.status === 'CONNECTED' ? sessionStatus.last_join_time : sessionStatus.disconnect_time}`,
+                    src: `${API_BASE}/screenshots/${sessionStatus.screenshot}`
+                  })}
+                >
                   [View Screenshot]
                 </button>
               )}
             </div>
           )}
 
+          {/* Last Session Historical Card */}
+          {sessionStatus && sessionStatus.last_session && sessionStatus.last_session.joined_at && (
+            <div className="last-session-card glass-panel">
+              <div className="last-session-header">
+                <Compass size={20} color="#a855f7" />
+                <h2>Last Ingested Session Attendance Proof</h2>
+              </div>
+              <div className="last-session-body">
+                <div className="last-session-meta-grid">
+                  <div className="meta-item">
+                    <span className="meta-label">Subject / Class</span>
+                    <strong className="meta-val">{sessionStatus.last_session.last_completed_class || 'N/A'}</strong>
+                  </div>
+                  <div className="meta-item">
+                    <span className="meta-label">Session Status</span>
+                    <span className="status-badge completed">
+                      {sessionStatus.last_session.final_session_state || 'COMPLETED'}
+                    </span>
+                  </div>
+                  <div className="meta-item">
+                    <span className="meta-label">Joined At</span>
+                    <strong className="meta-val">{sessionStatus.last_session.joined_at}</strong>
+                  </div>
+                  <div className="meta-item">
+                    <span className="meta-label">Disconnected At</span>
+                    <strong className="meta-val">{sessionStatus.last_session.disconnected_at || 'Active'}</strong>
+                  </div>
+                  <div className="meta-item">
+                    <span className="meta-label">Total Duration</span>
+                    <strong className="meta-val">{sessionStatus.last_session.session_duration || 'N/A'}</strong>
+                  </div>
+                </div>
+                
+                <div className="last-session-screenshots">
+                  {sessionStatus.last_session.latest_join_screenshot && (
+                    <div className="screenshot-preview-box">
+                      <span className="screenshot-title">🟢 Connection Check</span>
+                      <div className="screenshot-wrapper">
+                        <img 
+                          src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_join_screenshot}`} 
+                          alt="Join Screenshot" 
+                          onClick={() => {
+                            setModalScreenshot({
+                              title: '🟢 Join Success Validation Screenshot',
+                              meta: `Timestamp: ${sessionStatus.last_session.joined_at}`,
+                              src: `${API_BASE}/screenshots/${sessionStatus.last_session.latest_join_screenshot}`
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {sessionStatus.last_session.latest_disconnect_screenshot && (
+                    <div className="screenshot-preview-box">
+                      <span className="screenshot-title">🔴 Disconnect Check</span>
+                      <div className="screenshot-wrapper">
+                        <img 
+                          src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_disconnect_screenshot}`} 
+                          alt="Disconnect Screenshot" 
+                          onClick={() => {
+                            setModalScreenshot({
+                              title: '🔴 Disconnect Validation Screenshot',
+                              meta: `Timestamp: ${sessionStatus.last_session.disconnected_at}`,
+                              src: `${API_BASE}/screenshots/${sessionStatus.last_session.latest_disconnect_screenshot}`
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Screenshot Modal Viewer */}
-          {showScreenshot && sessionStatus?.screenshot && (
-            <div className="modal-overlay" onClick={() => setShowScreenshot(false)}>
+          {modalScreenshot && (
+            <div className="modal-overlay" onClick={() => setModalScreenshot(null)}>
               <div className="screenshot-modal-content glass-panel" onClick={(e) => e.stopPropagation()}>
-                <button className="btn-close" onClick={() => setShowScreenshot(false)}>
+                <button className="btn-close" onClick={() => setModalScreenshot(null)}>
                   <X size={20} />
                 </button>
-                <h3 className="screenshot-modal-title">
-                  {sessionStatus.status === 'CONNECTED' ? '🟢 Join Success Validation Screenshot' : '🔴 Disconnect Validation Screenshot'}
-                </h3>
-                <p className="screenshot-modal-meta">
-                  Timestamp: {sessionStatus.status === 'CONNECTED' ? sessionStatus.last_join_time : sessionStatus.disconnect_time}
-                </p>
+                <h3 className="screenshot-modal-title">{modalScreenshot.title}</h3>
+                <p className="screenshot-modal-meta">{modalScreenshot.meta}</p>
                 <div className="screenshot-image-container">
                   <img 
-                    src={`${API_BASE}/screenshots/${sessionStatus.screenshot}`} 
+                    src={modalScreenshot.src} 
                     alt="Validation Screenshot" 
                     className="validation-screenshot-img"
                   />

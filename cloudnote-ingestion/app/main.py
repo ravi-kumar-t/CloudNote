@@ -389,7 +389,8 @@ async def run_ingestion():
                             update_session_status(
                                 status="CONNECTED",
                                 screenshot=ss_filename,
-                                join_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                join_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                subject=subject
                             )
                         except Exception as ss_e:
                             logger.error(f"Join Success: Failed to capture validation screenshot: {ss_e}")
