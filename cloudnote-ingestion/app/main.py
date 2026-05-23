@@ -328,7 +328,13 @@ async def run_ingestion():
         if active_class:
             # We have an active class! Launch browser and execute targeted join & monitor session
             subject = active_class.get("subject_code", "Lecture")
-            logger.info(f"Unified Loop: Active class found: {subject}. Triggering targeted headed join...")
+            end_str = active_class.get("end_time")
+            try:
+                end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+            except Exception as parse_err:
+                logger.error(f"Failed to parse active class end_time '{end_str}': {parse_err}")
+                end_dt = datetime.now() + timedelta(hours=1)
+            logger.info(f"Unified Loop: Active class found: {subject} (Ends: {end_str}). Triggering targeted headed join...")
             update_ingestion_status("processing", details=f"Launching targeted browser to join class: {subject}", subject=subject)
             
             # Transition session status to CONNECTING
@@ -397,6 +403,16 @@ async def run_ingestion():
                             await asyncio.sleep(30)
                             await extractor.extract_content(page)
                             
+                            # 1. Scheduled session cutoff logic (with configurable 2 minutes grace buffer)
+                            now_time = datetime.now()
+                            grace_buffer = timedelta(minutes=2)
+                            cutoff_time = end_dt + grace_buffer
+                            
+                            if now_time >= cutoff_time:
+                                logger.info(f"[SESSION_END] Scheduled lecture end reached (End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, Cutoff: {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                                logger.info("[SESSION_END] Initiating graceful shutdown")
+                                break
+                            
                             # End detection
                             if await check_lecture_completion(page):
                                 logger.info("Unified Loop: Lecture completion detected.")
@@ -459,6 +475,8 @@ async def run_ingestion():
                     await context.close()
                     await browser.close()
                     logger.info("Unified Loop: Targeted browser closed, releasing system memory.")
+                    logger.info("[SESSION_END] Browser context closed")
+                    logger.info("[SESSION_END] Returning to scheduler standby")
                     
         elif next_upcoming_class:
             # We have an upcoming class. Determine smart sleep duration (until 5 minutes before start)
