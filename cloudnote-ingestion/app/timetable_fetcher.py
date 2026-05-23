@@ -51,19 +51,51 @@ async def fetch_timetable_data(page: Page) -> list:
                 if box["width"] == 0 or box["height"] == 0:
                     continue
                 
-                # Retrieve timing information from the data-full attribute inside the fc-time sub-container
-                time_el = loc.locator("div.fc-time, .fc-time")
-                timings_str = ""
-                if await time_el.count() > 0:
-                    data_full = await time_el.first.get_attribute("data-full")
-                    if data_full:
-                        timings_str = data_full.strip()
-                    else:
-                        timings_str = (await time_el.first.inner_text()).strip()
+                # Extract DOM diagnostics for debugging headless VM anomalies
+                outer_html = await loc.evaluate("el => el.outerHTML")
+                card_text = await loc.inner_text() or ""
+                logger.info(f"Timetable Scraper: Card [{i}] details -> Vis: {is_visible} | Box: {box} | Class: {classes_attr}")
+                logger.info(f"Timetable Scraper: Card [{i}] outerHTML: {outer_html}")
+                logger.info(f"Timetable Scraper: Card [{i}] innerText: {repr(card_text)}")
                 
-                # Fallback to card text parsing if timings_str is not resolved
+                # --- Layered Defense Timing Extraction ---
+                timings_str = ""
+                
+                # Layer A: Check data-full and data-start attributes on all sub-containers matching time patterns
+                time_locators = await loc.locator("div.fc-time, .fc-time, [class*='time']").all()
+                found_time_values = []
+                for t_loc in time_locators:
+                    t_text = await t_loc.inner_text() or ""
+                    t_df = await t_loc.get_attribute("data-full") or ""
+                    t_ds = await t_loc.get_attribute("data-start") or ""
+                    found_time_values.append(f"[text={repr(t_text)}, data-full={repr(t_df)}, data-start={repr(t_ds)}]")
+                    
+                    if t_df.strip():
+                        timings_str = t_df.strip()
+                        break
+                    elif t_ds.strip() and not timings_str:
+                        timings_str = t_ds.strip()
+                        
+                logger.info(f"Timetable Scraper: Card [{i}] nested time components found: {found_time_values}")
+                
+                # Layer B: Check data-full or data-start directly on the parent event card
                 if not timings_str:
-                    card_text = await loc.inner_text() or ""
+                    card_df = await loc.get_attribute("data-full")
+                    card_ds = await loc.get_attribute("data-start")
+                    if card_df:
+                        timings_str = card_df.strip()
+                    elif card_ds:
+                        timings_str = card_ds.strip()
+                
+                # Layer C: Check card's aria-label attribute
+                if not timings_str:
+                    aria_lbl = await loc.get_attribute("aria-label")
+                    if aria_lbl and ("-" in aria_lbl or "to" in aria_lbl):
+                        timings_str = aria_lbl.strip()
+                        logger.info(f"Timetable Scraper: Card [{i}] timing resolved from aria-label: {repr(timings_str)}")
+                
+                # Layer D: Fallback to card's first line of text
+                if not timings_str:
                     lines = [l.strip() for l in card_text.split("\n") if l.strip()]
                     if lines:
                         timings_str = lines[0]
@@ -74,7 +106,7 @@ async def fetch_timetable_data(page: Page) -> list:
                 if await title_el.count() > 0:
                     title_text = (await title_el.first.inner_text()).strip()
                 else:
-                    title_text = (await loc.inner_text()).strip()
+                    title_text = card_text.strip()
                 
                 logger.info(f"Timetable Scraper: Processing raw event timings: {timings_str} | Title: {title_text}")
                 

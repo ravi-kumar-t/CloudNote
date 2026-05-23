@@ -25,7 +25,7 @@ async def create_browser_and_page(p):
     # Create a browser context with permissions for microphone
     logger.info("Initializing browser context with HTTPS certificate bypass enabled...")
     context = await browser.new_context(
-        viewport={'width': 1280, 'height': 720},
+        viewport={'width': 1920, 'height': 1080},
         permissions=['microphone'],
         ignore_https_errors=True
     )
@@ -263,7 +263,10 @@ async def run_ingestion():
                     headless=True,
                     args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
                 )
-                context = await browser.new_context(ignore_https_errors=True)
+                context = await browser.new_context(
+                    ignore_https_errors=True,
+                    viewport={'width': 1920, 'height': 1080}
+                )
                 page = await context.new_page()
                 page.set_default_timeout(settings.BROWSER_TIMEOUT)
                 

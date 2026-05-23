@@ -112,6 +112,19 @@ def parse_class_times(timings_str: str, base_date: date = None):
         elif "am" in end_part.lower() and "am" not in start_part.lower() and "pm" not in start_part.lower():
             start_part += " AM"
 
+        # Robust PM-autocorrection fallback for ambiguous university slots (e.g. "8:00 - 9:00" -> "8:00 PM - 9:00 PM")
+        has_ampm = any(x in start_part.lower() or x in end_part.lower() for x in ("am", "pm"))
+        if not has_ampm:
+            try:
+                # Test parse the start hour
+                h_start = int(start_part.split(":")[0])
+                # If hour is between 1 and 11, it is almost certainly a PM class (e.g., 2:30 PM, 8:00 PM)
+                if 1 <= h_start <= 11:
+                    start_part += " PM"
+                    end_part += " PM"
+            except Exception:
+                pass
+
         # Safe parsing fallback patterns
         start_dt = None
         for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
