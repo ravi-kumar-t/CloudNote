@@ -33,31 +33,66 @@ async def fetch_timetable_data(page: Page) -> list:
     classes = []
     
     async def extract_visible_cards(base_date: date):
-        event_selector = "div.fc-event, div.fc-event div, div.calendar-event, div[class*='event'], a.fc-event, a.fc-time-grid-event"
+        # Focus strictly on top-level FullCalendar event cards (anchors or divs)
+        event_selector = "a.fc-event, div.fc-event"
         locators = await page.locator(event_selector).all()
-        logger.info(f"Timetable Scraper: Detected {len(locators)} raw event cards for {base_date.strftime('%Y-%m-%d')}.")
+        logger.info(f"Timetable Scraper: Detected {len(locators)} top-level fc-event cards for {base_date.strftime('%Y-%m-%d')}.")
         
         for i, loc in enumerate(locators):
             try:
                 classes_attr = await loc.get_attribute("class") or ""
-                text_content = await loc.inner_text() or ""
                 is_visible = await loc.is_visible()
                 box = await loc.bounding_box()
                 
-                if not is_visible or not text_content.strip() or not box:
+                if not is_visible or not box:
                     continue
                 if "fc-mirror-container" in classes_attr or "placeholder" in classes_attr.lower() or "fc-bgevent" in classes_attr:
                     continue
                 if box["width"] == 0 or box["height"] == 0:
                     continue
-                    
-                parsed = parse_event_card(text_content)
+                
+                # Retrieve timing information from the data-full attribute inside the fc-time sub-container
+                time_el = loc.locator("div.fc-time, .fc-time")
+                timings_str = ""
+                if await time_el.count() > 0:
+                    data_full = await time_el.first.get_attribute("data-full")
+                    if data_full:
+                        timings_str = data_full.strip()
+                    else:
+                        timings_str = (await time_el.first.inner_text()).strip()
+                
+                # Fallback to card text parsing if timings_str is not resolved
+                if not timings_str:
+                    card_text = await loc.inner_text() or ""
+                    lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                    if lines:
+                        timings_str = lines[0]
+                
+                # Retrieve course details (from fc-title or overall card text)
+                title_el = loc.locator("div.fc-title, .fc-title")
+                title_text = ""
+                if await title_el.count() > 0:
+                    title_text = (await title_el.first.inner_text()).strip()
+                else:
+                    title_text = (await loc.inner_text()).strip()
+                
+                logger.info(f"Timetable Scraper: Processing raw event timings: {timings_str} | Title: {title_text}")
+                
+                parsed = parse_event_card(f"{timings_str}\n{title_text}")
                 if parsed:
+                    # Retain the exact parsed 12-hour formatted timings
+                    parsed["timings"] = timings_str
+                    
                     # Resolve start and end datetimes based on target base_date
-                    start_dt, end_dt = parse_class_times(parsed["timings"], base_date)
+                    start_dt, end_dt = parse_class_times(timings_str, base_date)
                     parsed["start_time"] = start_dt.strftime("%Y-%m-%d %H:%M:%S") if start_dt else ""
                     parsed["end_time"] = end_dt.strftime("%Y-%m-%d %H:%M:%S") if end_dt else ""
                     
+                    # Store direct join url if present in href
+                    href = await loc.get_attribute("href")
+                    if href:
+                        parsed["join_url"] = href
+                        
                     # Ensure subject_code unique index key
                     parsed_key = f"{parsed['subject_code']}_{parsed['start_time']}"
                     # Avoid duplicates

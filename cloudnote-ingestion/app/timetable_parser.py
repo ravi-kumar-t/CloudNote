@@ -34,7 +34,16 @@ def parse_event_card(text_content: str) -> dict:
             timings = line
             continue
 
-        # Check if this line is "Lecture by ..." representing faculty
+        # 1. Look for subject code (e.g. CSE326, CSE 326, CSES009)
+        code_match = re.search(r'\b([A-Z]{2,4})[\s-]?(\d{3,4})\b', line, re.IGNORECASE)
+        if code_match:
+            subject_code = f"{code_match.group(1).upper()}{code_match.group(2)}"
+            # Extracted name is the rest of the line stripped
+            name_part = re.sub(r'\b[A-Z]{2,4}[\s-]?\d{3,4}\b', '', line, flags=re.IGNORECASE).strip(" :-\t")
+            if name_part and "lecture" not in name_part.lower() and "by" not in name_part.lower():
+                subject_name = name_part
+
+        # 2. Check if this line is "Lecture by ..." representing faculty
         if "lecture by" in line.lower():
             parts = line.split(":", 1)
             raw_fac = parts[1].strip() if len(parts) > 1 else line.replace("Lecture by", "").strip(" :")
@@ -49,19 +58,8 @@ def parse_event_card(text_content: str) -> dict:
                 if cleaned_n:
                     cleaned_names.append(cleaned_n)
             faculty = " / ".join(cleaned_names)
-            continue
 
-        # Look for subject code (e.g. CSE326, CSE 326, CSES009)
-        code_match = re.search(r'\b([A-Z]{2,4})[\s-]?(\d{3,4})\b', line, re.IGNORECASE)
-        if code_match:
-            subject_code = f"{code_match.group(1).upper()}{code_match.group(2)}"
-            # Extracted name is the rest of the line stripped
-            name_part = re.sub(r'\b[A-Z]{2,4}[\s-]?\d{3,4}\b', '', line, flags=re.IGNORECASE).strip(" :-\t")
-            if name_part and "lecture" not in name_part.lower():
-                subject_name = name_part
-            continue
-
-        # Check status indicators
+        # 3. Check status indicators
         if "join" in line.lower() and "not" not in line.lower():
             join_availability = True
             status = "JOINABLE_ACTIVE"

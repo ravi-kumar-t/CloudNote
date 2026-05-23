@@ -419,13 +419,13 @@ async def run_ingestion():
                 await asyncio.sleep(10)
                 
         else:
-            # No more classes today or tomorrow. Sleep until the next day (e.g. 8:00 AM)
-            logger.info("Unified Loop: No active or upcoming classes found for today or tomorrow.")
+            # All scheduled classes today are finished. Sleep until the next day's refresh window (e.g. 8:00 AM)
+            logger.info("Unified Loop: All scheduled classes for today have been completed successfully.")
             tomorrow_8am = datetime.combine(date.today() + timedelta(days=1), time(8, 0))
             sleep_duration = (tomorrow_8am - datetime.now()).total_seconds()
             
-            logger.info(f"Unified Loop: Entering smart sleep until tomorrow 8:00 AM ({sleep_duration} seconds)...")
-            update_ingestion_status("idle", details="No more classes scheduled today. Sleeping until tomorrow.")
+            logger.info(f"Unified Loop: Entering smart sleep until tomorrow 8:00 AM ({sleep_duration} seconds) for new day rollover...")
+            update_ingestion_status("idle", details="All classes completed for today. Resting until tomorrow.")
             
             target_time = asyncio.get_event_loop().time() + sleep_duration
             while asyncio.get_event_loop().time() < target_time:
