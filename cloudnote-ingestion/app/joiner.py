@@ -172,8 +172,9 @@ async def click_join_button(page: Page):
             
             if join_candidates:
                 logger.info(f"Found {len(join_candidates)} potential Join buttons. Prioritizing first visible match.")
+                logger.info("[JOIN_PHASE] Join button detected")
                 await join_candidates[0].click(force=True)
-                logger.info("Join button found and clicked!")
+                logger.info("[JOIN_PHASE] Join button detected and clicked successfully!")
                 return True
                 
         except Exception as e:
@@ -217,7 +218,7 @@ async def handle_meeting_room(page: Page):
     if not iframe_handle:
         raise Exception("Could not locate meeting iframe.")
     
-    logger.info("Successfully switched to meeting context.")
+    logger.info("[JOIN_PHASE] BBB iframe detected and switched successfully.")
 
     # 2. Click Microphone
     logger.info("Selecting microphone...")
@@ -225,13 +226,13 @@ async def handle_meeting_room(page: Page):
     await iframe_handle.click(MeetingSelectors.MICROPHONE_BUTTON)
     
     # 3. Handle Echo Test
-    logger.info("Waiting for echo test (YES button)...")
+    logger.info("[JOIN_PHASE] Echo test detected")
     try:
         await iframe_handle.wait_for_selector(MeetingSelectors.ECHO_YES_BUTTON, state="visible", timeout=30000)
         await iframe_handle.click(MeetingSelectors.ECHO_YES_BUTTON)
-        logger.info("Echo test confirmed. Fully joined class!")
+        logger.info("[JOIN_PHASE] Audio connection confirmed. Fully joined class!")
     except TimeoutError:
-        logger.warning("Echo test button didn't appear. Possibly auto-joined or already in.")
+        logger.warning("[JOIN_PHASE] Echo test button didn't appear. Possibly auto-joined or already in.")
 
 async def analyze_lecture_state(page: Page) -> str:
     """Analyzes the lecture page to determine its state and logs diagnostics."""
@@ -295,19 +296,110 @@ async def analyze_lecture_state(page: Page) -> str:
             })
         except Exception:
             pass
+
+    # Helper function to find the leaf-most visible content element containing a keyword
+    async def scan_for_leaf_element(pattern: str):
+        excludes = [
+            "header", "footer", "nav", ".sidebar", ".navigation", "#sidebar", 
+            "#header", "#footer", "#menu", ".menu", ".user-profile", 
+            "li.nav-item", "a.nav-link", ".menu-item", ".dropdown"
+        ]
+        js_query = """
+        (pattern, excludes) => {
+            function isExcluded(el) {
+                for (const sel of excludes) {
+                    if (el.closest(sel)) return true;
+                }
+                return false;
+            }
             
-    # 4. Explicit detection for state indicators
+            const elements = Array.from(document.querySelectorAll('*'));
+            let bestMatch = null;
+            let bestDepth = -1;
+            
+            for (const el of elements) {
+                if (isExcluded(el)) continue;
+                
+                // Only consider visible elements
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || el.offsetWidth === 0 || el.offsetHeight === 0) {
+                    continue;
+                }
+                
+                const text = (el.innerText || "").toLowerCase();
+                if (text.includes(pattern.toLowerCase())) {
+                    let depth = 0;
+                    let temp = el;
+                    while (temp) {
+                        depth++;
+                        temp = temp.parentElement;
+                    }
+                    
+                    if (depth > bestDepth) {
+                        bestDepth = depth;
+                        bestMatch = el;
+                    }
+                }
+            }
+            
+            if (bestMatch) {
+                let path = [];
+                let temp = bestMatch;
+                while (temp) {
+                    let name = temp.tagName.toLowerCase();
+                    if (temp.id) name += '#' + temp.id;
+                    if (temp.className) {
+                        name += '.' + Array.from(temp.classList).join('.');
+                    }
+                    path.unshift(name);
+                    temp = temp.parentElement;
+                }
+                return {
+                    tag: bestMatch.tagName,
+                    id: bestMatch.id,
+                    classes: bestMatch.className,
+                    text: bestMatch.innerText.trim(),
+                    outerHTML: bestMatch.outerHTML.substring(0, 1000),
+                    path: path.join(' > ')
+                };
+            }
+            return null;
+        }
+        """
+        try:
+            return await page.evaluate(js_query, [pattern, excludes])
+        except Exception as js_err:
+            logger.warning(f"JS leaf-most scan for '{pattern}' failed: {js_err}")
+            return None
+
+    # Perform highly scoped content scans to prevent false positives
+    not_started_match = await scan_for_leaf_element("not started yet")
+    if not not_started_match:
+        not_started_match = await scan_for_leaf_element("class not started")
+    if not not_started_match:
+        not_started_match = await scan_for_leaf_element("yet to start")
+        
+    join_not_avail_match = await scan_for_leaf_element("join not available")
+    if not join_not_avail_match:
+        join_not_avail_match = await scan_for_leaf_element("not available yet")
+        
+    completed_match = await scan_for_leaf_element("completed")
+    if not completed_match:
+        completed_match = await scan_for_leaf_element("class ended")
+    if not completed_match:
+        completed_match = await scan_for_leaf_element("lecture completed")
+    if not completed_match:
+        completed_match = await scan_for_leaf_element("ended")
+
+    # Read page text for countdown
     page_text = (await page.inner_text("body")).lower()
-    
-    state = "UNKNOWN"
-    
-    # Check for countdown timer (e.g. 01h 05m)
     import re
     h_match = re.search(r'(\d+)\s*h', page_text)
     m_match = re.search(r'(\d+)\s*m', page_text)
     s_match = re.search(r'(\d+)\s*s', page_text)
-    
     has_countdown = bool(h_match or m_match or s_match)
+
+    state = "UNKNOWN"
     
     # Priority 1: JOINABLE_ACTIVE (visible enabled Join button / jnr.jsp / joinBtn / clickable)
     join_btn_found = False
@@ -324,20 +416,59 @@ async def analyze_lecture_state(page: Page) -> str:
             
     if join_btn_found:
         state = "JOINABLE_ACTIVE"
-    # Priority 2: UPCOMING (countdown exists, NO active Join button exists)
-    elif "class not started" in page_text or "not started" in page_text or has_countdown:
+    # Priority 2: NOT_STARTED (explicit "Not started yet" content match, taking high precedence)
+    elif not_started_match:
+        state = "NOT_STARTED"
+        logger.info(f"Priority 2 Match - 'Not Started' text detected inside content element:")
+        logger.info(f"  Matched selector/tag: {not_started_match['tag']}")
+        logger.info(f"  Matched text: '{not_started_match['text']}'")
+        logger.info(f"  Matched DOM node details: ID='{not_started_match['id']}', Classes='{not_started_match['classes']}'")
+        logger.info(f"  Matched container path: {not_started_match['path']}")
+    # Priority 3: UPCOMING (countdown timer exists, NO active Join button exists)
+    elif has_countdown:
         state = "UPCOMING"
-    # Priority 3: NOT_YET_AVAILABLE (explicit "Join not available" / disabled Join button / no clickable join action)
-    elif "join not available" in page_text or "not available" in page_text:
+        logger.info(f"Priority 3 Match - Countdown timer found on the page.")
+    # Priority 4: NOT_YET_AVAILABLE (explicit "Join not available" inside core content area)
+    elif join_not_avail_match:
         state = "NOT_YET_AVAILABLE"
-    # Priority 4: COMPLETED (completed or ended)
-    elif "completed" in page_text or "ended" in page_text:
+        logger.info(f"Priority 4 Match - 'Join Not Available' text detected inside content element:")
+        logger.info(f"  Matched selector/tag: {join_not_avail_match['tag']}")
+        logger.info(f"  Matched text: '{join_not_avail_match['text']}'")
+        logger.info(f"  Matched container path: {join_not_avail_match['path']}")
+    # Priority 5: COMPLETED (completed or ended inside core content area)
+    elif completed_match:
         state = "COMPLETED"
+        logger.info(f"Priority 5 Match - 'Completed/Ended' text detected inside content element:")
+        logger.info(f"  Matched selector/tag: {completed_match['tag']}")
+        logger.info(f"  Matched text: '{completed_match['text']}'")
+        logger.info(f"  Matched DOM node details: ID='{completed_match['id']}', Classes='{completed_match['classes']}'")
+        logger.info(f"  Matched container path: {completed_match['path']}")
     else:
         state = "UNKNOWN"
+
+    # Save diagnostic artifacts if COMPLETED is detected to allow false positive inspections
+    if state == "COMPLETED":
+        try:
+            os.makedirs("screenshots", exist_ok=True)
+            os.makedirs("scratch", exist_ok=True)
             
-    logger.info(f"Lecture state determined as: {state}")
-    
+            # Save diagnostic files as requested
+            diag_ss_path = "screenshots/completed_false_positive.png"
+            await page.screenshot(path=diag_ss_path)
+            
+            diag_html_path = "scratch/completed_false_positive.html"
+            html_content = await page.content()
+            with open(diag_html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+                
+            logger.info("Saved COMPLETED state diagnostics successfully:")
+            logger.info(f"  Screenshot -> {diag_ss_path}")
+            logger.info(f"  DOM HTML -> {diag_html_path}")
+            if completed_match:
+                logger.info(f"  Source element outerHTML (Truncated): {completed_match['outerHTML']}")
+        except Exception as diag_err:
+            logger.warning(f"Failed to write completed diagnostics files: {diag_err}")
+
     # Future-ready retry metadata
     wait_time = 300
     if has_countdown:
@@ -354,13 +485,6 @@ async def analyze_lecture_state(page: Page) -> str:
     if settings.DEBUG_SLEEP_OVERRIDE_SECONDS is not None:
         logger.warning(f"DEBUG OVERRIDE: Forcing sleep duration to {settings.DEBUG_SLEEP_OVERRIDE_SECONDS} seconds.")
         wait_time = settings.DEBUG_SLEEP_OVERRIDE_SECONDS
- 
-    if "join not available" in page_text:
-        logger.info("Explicit detection: 'Join not available' text found on the page.")
-    if "class not started" in page_text:
-        logger.info("Explicit detection: 'Class not started' text found on the page.")
-    if "completed" in page_text:
-        logger.info("Explicit detection: 'Completed' text found on the page.")
         
     return {"state": state, "wait_time": wait_time}
 
@@ -391,9 +515,9 @@ async def join_class_pipeline(page: Page):
             lecture_state = lecture_info["state"]
             wait_time = lecture_info["wait_time"]
             
-            # If we transitioned from UPCOMING but class is not yet joinable, run pre-join polling
-            if had_upcoming and lecture_state not in ["JOINABLE_ACTIVE", "UPCOMING"]:
-                logger.info("Lecture transitioned from UPCOMING but JOINABLE_ACTIVE is not immediately available.")
+            # If we transitioned from UPCOMING/NOT_STARTED but class is not yet joinable, run pre-join polling
+            if had_upcoming and lecture_state not in ["JOINABLE_ACTIVE", "UPCOMING", "NOT_STARTED"]:
+                logger.info("Lecture transitioned from UPCOMING/NOT_STARTED but JOINABLE_ACTIVE is not immediately available.")
                 logger.info("Entering pre-join polling mode: polling every 20 seconds for up to 10 minutes...")
                 
                 poll_interval = 20
@@ -452,9 +576,9 @@ async def join_class_pipeline(page: Page):
                 await handle_meeting_room(page)
                 return True
                 
-            elif lecture_state == "UPCOMING":
+            elif lecture_state in ["UPCOMING", "NOT_STARTED"]:
                 had_upcoming = True
-                logger.info(f"Lecture is UPCOMING. Sleeping internally for {wait_time} seconds before re-evaluating...")
+                logger.info(f"Lecture is {lecture_state}. Sleeping internally for {wait_time} seconds before re-evaluating...")
                 await asyncio.sleep(wait_time)
                 continue
                 

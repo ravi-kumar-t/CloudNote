@@ -235,6 +235,14 @@ async def run_ingestion_core(session_state, p):
 
 async def run_ingestion():
     logger.info("Starting CloudNote Continuous Ingestion Worker...")
+    
+    # Reset persistent session status to clean IDLE state on application startup
+    try:
+        from .session_status import reset_session_status
+        reset_session_status()
+    except Exception as reset_err:
+        logger.error(f"Failed to reset session status on worker startup: {reset_err}")
+        
     from .database import update_ingestion_status
     from .timetable_cache import timetable_cache
     from .timetable_fetcher import fetch_timetable_data
@@ -323,11 +331,20 @@ async def run_ingestion():
             logger.info(f"Unified Loop: Active class found: {subject}. Triggering targeted headed join...")
             update_ingestion_status("processing", details=f"Launching targeted browser to join class: {subject}", subject=subject)
             
+            # Transition session status to CONNECTING
+            try:
+                from .session_status import update_session_status
+                update_session_status("CONNECTING")
+            except Exception as status_err:
+                logger.error(f"Failed to update session status to CONNECTING: {status_err}")
+            
             async with async_playwright() as p:
+                logger.info("[JOIN_PHASE] Launching browser...")
                 browser, context, page = await create_browser_and_page(p)
                 
                 try:
                     await perform_login(page)
+                    logger.info("[JOIN_PHASE] Login successful")
                     
                     # Target join success loop
                     join_success = False
@@ -349,6 +366,26 @@ async def run_ingestion():
                     else:
                         logger.info("Unified Loop: Successfully joined active session. Monitoring active stream...")
                         update_ingestion_status("processing", details="Monitoring active lecture stream", subject=subject)
+                        
+                        # Wait an extra 5 seconds for UI elements/layout to stabilize
+                        await asyncio.sleep(5)
+                        
+                        # Capture join success screenshot
+                        now_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                        ss_filename = f"join_success_{now_str}.png"
+                        ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
+                        try:
+                            await page.screenshot(path=ss_path)
+                            logger.info(f"Join Success: Saved validation screenshot to {ss_path}")
+                            logger.info("[JOIN_PHASE] Join success screenshot captured")
+                            from .session_status import update_session_status
+                            update_session_status(
+                                status="CONNECTED",
+                                screenshot=ss_filename,
+                                join_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                        except Exception as ss_e:
+                            logger.error(f"Join Success: Failed to capture validation screenshot: {ss_e}")
                         
                         # Active monitoring and passive text extraction
                         extractor = LectureExtractor()
@@ -395,6 +432,29 @@ async def run_ingestion():
                     logger.error(f"Unified Loop: targeted class session execution failed: {e}")
                     update_ingestion_status("failed", error=str(e))
                 finally:
+                    # Capture disconnect screenshot if we were previously connected
+                    try:
+                        from .session_status import get_session_status, update_session_status
+                        current_status = get_session_status()
+                        if current_status.get("status") == "CONNECTED":
+                            now_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                            ss_filename = f"disconnect_{now_str}.png"
+                            ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
+                            try:
+                                if page and not page.is_closed():
+                                    await page.screenshot(path=ss_path)
+                                    logger.info(f"Disconnect Check: Captured validation screenshot at {ss_path}.")
+                            except Exception as ss_e:
+                                logger.error(f"Disconnect Check: Failed to capture validation screenshot: {ss_e}")
+                            
+                            update_session_status(
+                                status="DISCONNECTED",
+                                screenshot=ss_filename,
+                                disconnect_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                    except Exception as status_err:
+                        logger.error(f"Failed to execute status monitoring update on disconnect: {status_err}")
+                        
                     await context.close()
                     await browser.close()
                     logger.info("Unified Loop: Targeted browser closed, releasing system memory.")

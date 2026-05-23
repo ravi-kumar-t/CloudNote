@@ -9,13 +9,20 @@ from pydantic import BaseModel
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
 
 from app.database import get_db_connection, init_db
 
 # Ensure SQLite schema initialized on server start
 init_db()
 
+# Ensure screenshots directory exists to prevent FastAPI mount failures
+os.makedirs("screenshots", exist_ok=True)
+
 app = FastAPI(title="CloudNote API", version="1.0.0")
+
+# Mount static screenshots directory
+app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshots")
 
 # Enable CORS for React dashboard access
 app.add_middleware(
@@ -195,6 +202,19 @@ def get_ingestion_status(current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read ingestion status snapshot: {e}"
+        )
+
+# Session status endpoint for screenshot validation
+@app.get("/api/session-status")
+def get_session_status_api(current_user: dict = Depends(get_current_user)):
+    """Retrieves the active browser session join status and validation screenshots."""
+    try:
+        from app.session_status import get_session_status
+        return get_session_status()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load session status metadata: {e}"
         )
 
 # Get cached timetable endpoint
