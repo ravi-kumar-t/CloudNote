@@ -302,7 +302,9 @@ async def analyze_lecture_state(page: Page) -> str:
         excludes = [
             "header", "footer", "nav", ".sidebar", ".navigation", "#sidebar", 
             "#header", "#footer", "#menu", ".menu", ".user-profile", 
-            "li.nav-item", "a.nav-link", ".menu-item", ".dropdown"
+            "li.nav-item", "a.nav-link", ".menu-item", ".dropdown",
+            ".card-text", ".dashboard-card", "#homepage-cards", ".homepage-card",
+            "p.card-text", "div.card"
         ]
         
         logger.info(f"[DOM_SCAN] scanning keyword: '{pattern}'")
@@ -312,6 +314,17 @@ async def analyze_lecture_state(page: Page) -> str:
         ({pattern, excludes}) => {
             const safeExcludes = Array.isArray(excludes) ? excludes : [];
             
+            // Hard blacklist of phrases unrelated to lecture status
+            const hardBlacklist = [
+                "scheduled and completed tests",
+                "completed tests",
+                "scheduled tests",
+                "tests",
+                "exam",
+                "click here to view all",
+                "practice tests"
+            ];
+            
             function isExcluded(el) {
                 for (const sel of safeExcludes) {
                     if (el.closest(sel)) return true;
@@ -319,7 +332,28 @@ async def analyze_lecture_state(page: Page) -> str:
                 return false;
             }
             
-            const elements = Array.from(document.querySelectorAll('*'));
+            // Try to restrict search to active lecture content areas first
+            const searchScopes = [
+                ".ui-dialog-content",
+                "#dialog-content",
+                ".modal-content",
+                ".modal-body",
+                "#main-content",
+                "main",
+                "#content",
+                ".content-wrapper"
+            ];
+            
+            let root = document;
+            for (const scope of searchScopes) {
+                const scopeEl = document.querySelector(scope);
+                if (scopeEl && scopeEl.offsetWidth > 0 && scopeEl.offsetHeight > 0) {
+                    root = scopeEl;
+                    break;
+                }
+            }
+            
+            const elements = Array.from(root.querySelectorAll('*'));
             let bestMatch = null;
             let bestDepth = -1;
             
@@ -332,7 +366,19 @@ async def analyze_lecture_state(page: Page) -> str:
                     continue;
                 }
                 
-                const text = (el.innerText || "").toLowerCase();
+                const text = (el.innerText || "").trim().toLowerCase();
+                
+                // Skip if empty or matches hard blacklist phrases
+                if (!text) continue;
+                let blacklisted = false;
+                for (const phrase of hardBlacklist) {
+                    if (text.includes(phrase)) {
+                        blacklisted = true;
+                        break;
+                    }
+                }
+                if (blacklisted) continue;
+                
                 if (text.includes(pattern.toLowerCase())) {
                     let depth = 0;
                     let temp = el;
