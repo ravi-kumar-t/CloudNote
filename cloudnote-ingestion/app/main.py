@@ -352,7 +352,8 @@ async def run_ingestion():
                         logger.info(f"Unified Loop: Attempting to join {subject} (Attempt {attempt}/{join_attempts_limit})...")
                         try:
                             from .joiner import join_class_pipeline
-                            join_success = await join_class_pipeline(page)
+                            join_url = active_class.get("join_url")
+                            join_success = await join_class_pipeline(page, join_url=join_url)
                             if join_success:
                                 break
                         except Exception as join_err:
@@ -405,7 +406,7 @@ async def run_ingestion():
                             from .watchdog import check_session_health, attempt_recovery
                             if not await check_session_health(page, browser):
                                 logger.warning("Unified Loop: Watchdog health failure. Recovering...")
-                                recovery = await attempt_recovery(page, browser, context, p)
+                                recovery = await attempt_recovery(page, browser, context, p, join_url=join_url)
                                 if recovery:
                                     page, browser, context = recovery
                                     rejoin_attempts += 1

@@ -542,11 +542,34 @@ async def analyze_lecture_state(page: Page) -> str:
         
     return {"state": state, "wait_time": wait_time}
 
-async def join_class_pipeline(page: Page):
+async def join_class_pipeline(page: Page, join_url: str = None):
     """Orchestrates the entire joining flow using a state-machine loop."""
     try:
-        # Note: At the start of the joining pipeline, the browser is already on the lecture page (mi.jsp)
-        # after select_latest_event has been executed. No need to reload calendar or search events here.
+        # Explicit target page navigation if join_url is provided
+        if join_url:
+            if not join_url.startswith("http"):
+                from urllib.parse import urlparse
+                parsed = urlparse(page.url)
+                base_origin = f"{parsed.scheme}://{parsed.netloc}"
+                rel_url = join_url if join_url.startswith("/") else f"/{join_url}"
+                target_url = f"{base_origin}{rel_url}"
+            else:
+                target_url = join_url
+                
+            logger.info(f"[JOIN_PHASE] Opening lecture join URL: {target_url}")
+            await page.goto(target_url, wait_until="networkidle", timeout=60000)
+            logger.info(f"[JOIN_PHASE] Navigation complete. Final page URL: {page.url}")
+            
+            # Wait for content container
+            try:
+                await page.wait_for_selector(".ui-dialog-content, .modal-content, #main-content, main, #content", timeout=15000)
+                logger.info("[JOIN_PHASE] Lecture content container loaded successfully.")
+            except Exception as wait_err:
+                logger.warning(f"[JOIN_PHASE] Warning: Lecture container load wait timed out: {wait_err}")
+        else:
+            # Fallback/Default: At the start of the joining pipeline, the browser is already on the lecture page (mi.jsp)
+            # after select_latest_event has been executed. No need to reload calendar or search events here.
+            logger.info("[JOIN_PHASE] No explicit join_url provided. Proceeding with current page state...")
         
         # ==========================================
         # [ULTRA FAST PATH] Production Instant-Click

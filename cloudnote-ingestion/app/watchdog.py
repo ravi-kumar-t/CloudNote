@@ -83,7 +83,7 @@ async def check_session_health(page, browser) -> bool:
         logger.warning(f"Watchdog Health Check: Exception encountered: {e}")
         return False
 
-async def attempt_recovery(page, browser, context, p):
+async def attempt_recovery(page, browser, context, p, join_url: str = None):
     """Executes the 3-step recovery watchdog pipeline."""
     logger.info("[RECOVERY] Starting session recovery watchdog process...")
     
@@ -165,7 +165,7 @@ async def attempt_recovery(page, browser, context, p):
     logger.info("[RECOVERY] Watchdog Recovery Step 3: Attempting to Re-open Lecture...")
     try:
         from .joiner import join_class_pipeline
-        joined = await join_class_pipeline(new_page)
+        joined = await join_class_pipeline(new_page, join_url=join_url)
         if joined:
             logger.info("[RECOVERY] Watchdog Step 3 Success: Re-opened and re-joined lecture successfully.")
             # Restore status to CONNECTED
