@@ -304,10 +304,16 @@ async def analyze_lecture_state(page: Page) -> str:
             "#header", "#footer", "#menu", ".menu", ".user-profile", 
             "li.nav-item", "a.nav-link", ".menu-item", ".dropdown"
         ]
+        
+        logger.info(f"[DOM_SCAN] scanning keyword: '{pattern}'")
+        logger.info(f"[DOM_SCAN] excludes count: {len(excludes)}")
+        
         js_query = """
-        (pattern, excludes) => {
+        ({pattern, excludes}) => {
+            const safeExcludes = Array.isArray(excludes) ? excludes : [];
+            
             function isExcluded(el) {
-                for (const sel of excludes) {
+                for (const sel of safeExcludes) {
                     if (el.closest(sel)) return true;
                 }
                 return false;
@@ -367,7 +373,9 @@ async def analyze_lecture_state(page: Page) -> str:
         }
         """
         try:
-            return await page.evaluate(js_query, [pattern, excludes])
+            # Pass arguments as a dictionary to avoid Playwright serialization mismatches
+            payload = {"pattern": pattern, "excludes": excludes}
+            return await page.evaluate(js_query, payload)
         except Exception as js_err:
             logger.warning(f"JS leaf-most scan for '{pattern}' failed: {js_err}")
             return None
