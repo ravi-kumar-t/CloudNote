@@ -1,0 +1,351 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Active Browser Session Status",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "cloudnote_active_session_state",
+          "format": "time_series",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "blue",
+                  "index": 0,
+                  "text": "IDLE"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "CONNECTED"
+                },
+                "2": {
+                  "color": "orange",
+                  "index": 2,
+                  "text": "RECOVERING"
+                },
+                "3": {
+                  "color": "purple",
+                  "index": 3,
+                  "text": "DISCONNECTED"
+                },
+                "4": {
+                  "color": "red",
+                  "index": 4,
+                  "text": "FAILED"
+                },
+                "5": {
+                  "color": "yellow",
+                  "index": 5,
+                  "text": "CONNECTING"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "title": "Ingestion Daemon Status",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "cloudnote_ingestion_loop_status",
+          "format": "time_series",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "blue",
+                  "index": 0,
+                  "text": "IDLE"
+                },
+                "1": {
+                  "color": "orange",
+                  "index": 1,
+                  "text": "PROCESSING"
+                },
+                "2": {
+                  "color": "red",
+                  "index": 2,
+                  "text": "FAILED"
+                },
+                "3": {
+                  "color": "green",
+                  "index": 3,
+                  "text": "COMPLETED"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "title": "Scheduler Heartbeat Status",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "time() - cloudnote_scheduler_heartbeat_timestamp",
+          "format": "time_series",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": [
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "red",
+                  "text": "DEAD"
+                }
+              },
+              "type": "special"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 45
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "valueAndName"
+      }
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 4,
+      "title": "FastAPI Dynamic API Call Traffic",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(cloudnote_api_requests_total) by (endpoint, method)",
+          "legendFormat": "{{method}} {{endpoint}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": [
+    "cloudnote",
+    "observability"
+  ],
+  "title": "CloudNote Live Observability",
+  "uid": "cloudnote_ops",
+  "version": 1
+}

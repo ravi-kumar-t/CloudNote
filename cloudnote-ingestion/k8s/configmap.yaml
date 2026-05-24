@@ -8,3 +8,5 @@ data:
   HEADLESS: "True"
   LOG_LEVEL: "INFO"
   BROWSER_TIMEOUT: "60000"
+  REDIS_URL: "redis://cloudnote-redis:6379/0"
+

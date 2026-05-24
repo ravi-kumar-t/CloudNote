@@ -10,6 +10,8 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import PlainTextResponse
+from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
 from app.database import get_db_connection, init_db
 
@@ -18,6 +20,25 @@ init_db()
 
 # Ensure screenshots directory exists to prevent FastAPI mount failures
 os.makedirs("screenshots", exist_ok=True)
+
+# Prometheus Observability Metrics (Sidecar Integration)
+REQUEST_COUNT = Counter(
+    "cloudnote_api_requests_total",
+    "Total incoming API requests",
+    ["method", "endpoint"]
+)
+SCHEDULER_HEARTBEAT = Gauge(
+    "cloudnote_scheduler_heartbeat_timestamp",
+    "Epoch timestamp of the last active scheduler heartbeat"
+)
+ACTIVE_SESSION_STATE = Gauge(
+    "cloudnote_active_session_state",
+    "Active Playwright session state: 0=IDLE, 1=CONNECTED, 2=RECOVERING, 3=DISCONNECTED, 4=FAILED, 5=CONNECTING"
+)
+INGESTION_LOOP_STATUS = Gauge(
+    "cloudnote_ingestion_loop_status",
+    "Current status of the ingestion scheduler: 0=idle, 1=processing, 2=failed, 3=completed"
+)
 
 app = FastAPI(title="CloudNote API", version="1.0.0")
 
@@ -38,6 +59,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Prometheus Request Tracking Middleware
+@app.middleware("http")
+async def track_prometheus_requests(request, call_next):
+    # Exclude metrics endpoint from tracking itself to avoid scrape noise
+    if request.url.path != "/metrics":
+        REQUEST_COUNT.labels(method=request.method, endpoint=request.url.path).inc()
+    response = await call_next(request)
+    return response
 
 # JWT Configurations
 JWT_SECRET = "cloudnote_premium_jwt_secret_key_888"
@@ -118,6 +148,45 @@ class LectureSummaryResponse(BaseModel):
     summary: str
     topics: List[str]
     key_points: List[str]
+
+# 0. Prometheus Metrics Endpoint (Public sidecar scrape target)
+@app.get("/metrics", response_class=PlainTextResponse)
+def get_prometheus_metrics():
+    """Exposes custom and system metrics dynamically updated at scrape-time."""
+    # A. Dynamic Scrape-Time Active Session Status update
+    try:
+        from app.session_status import get_session_status
+        session_data = get_session_status()
+        status_str = session_data.get("status", "IDLE").upper()
+        state_map = {"IDLE": 0, "CONNECTED": 1, "RECOVERING": 2, "DISCONNECTED": 3, "FAILED": 4, "CONNECTING": 5}
+        ACTIVE_SESSION_STATE.set(state_map.get(status_str, 0))
+    except Exception:
+        pass
+
+    # B. Dynamic Scrape-Time Ingestion Loop Status update
+    try:
+        status_file = "logs/ingestion_status.json"
+        if os.path.exists(status_file):
+            with open(status_file, "r", encoding="utf-8") as f:
+                ing_data = json.load(f)
+            ing_status = ing_data.get("status", "idle").lower()
+            ing_map = {"idle": 0, "processing": 1, "failed": 2, "completed": 3}
+            INGESTION_LOOP_STATUS.set(ing_map.get(ing_status, 0))
+    except Exception:
+        pass
+
+    # C. Dynamic Scrape-Time Scheduler Heartbeat update
+    try:
+        from app.redis_service import redis_service
+        hb = redis_service.get_scheduler_heartbeat()
+        if hb:
+            SCHEDULER_HEARTBEAT.set(hb)
+        else:
+            SCHEDULER_HEARTBEAT.set(0)
+    except Exception:
+        pass
+
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # 1. Registration endpoint
 @app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)

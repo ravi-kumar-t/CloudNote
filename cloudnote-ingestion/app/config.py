@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     AI_SUMMARY_FILE: str = "logs/ai_summary.json"
     MAX_BUFFER_LINES: int = 500
     MAX_REJOIN_ATTEMPTS: int = 3
+    REDIS_URL: Optional[str] = "redis://redis:6379/0"
+
 
     
 settings = Settings()

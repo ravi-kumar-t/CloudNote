@@ -114,8 +114,46 @@ docker compose logs -f
 # Shut down the stack
 docker compose down
 ```
+---
+
+## 🌐 Production Infrastructure & Observability Stack (New!)
+
+CloudNote now includes lightweight enterprise sidecar integrations to demonstrate real production-grade deployment and operations:
+
+### 1. Port & Service Layout
+When running the Docker Compose stack, the following services are spun up and mapped to host-only loopbacks:
+* 🖥️ **React Frontend**: `http://localhost:3000` (Nginx static compilation server)
+* ⚙️ **FastAPI Backend**: `http://localhost:8000` (Core REST engine + Prometheus exporter)
+* 🔴 **Redis Cache & Heartbeats**: `http://localhost:6379` (Lightweight optional state/heartbeat caching)
+* 📈 **Prometheus Collector**: `http://localhost:9090` (Scrapes FastAPI metrics every 5 seconds)
+* 📊 **Grafana Visualization**: `http://localhost:3001` (Pre-loaded system analytics dashboard)
+
+### 2. Grafana Dashboard & Credentials
+Open `http://localhost:3001` in your browser. CloudNote comes with a pre-wired datasource and pre-loaded dashboard, rendering active worker metrics instantly:
+* **Uptime/System Health**: Shows live REST state gauges.
+* **Scheduler Heartbeat Age**: Tracks exactly when the Playwright background daemon checked in.
+* **Active Session Status**: Visualizes active states (IDLE, CONNECTED, RECOVERING, FAILED).
+* **API Traffic Panel**: Real-time traffic breakdowns by HTTP method and URI route.
+
+> [!WARNING]
+> **Demo Credentials**: The default Grafana credentials are set to username `admin` and password `admin` for **demo/development-only** purposes. In true production clusters, configure these dynamically via Kubernetes Secret volumes.
+
+### 3. Resiliency Guardrails
+* **No Redis Hard Dependency**: All Redis operations are wrapped in robust connection-pool try/catch fallbacks. If the Redis server is offline (e.g. running outside Docker or local developer unit testing), the backend and ingestion worker seamlessly fall back to local JSON file persistence.
+* **Passive Prometheus Scrapes**: Prometheus metrics are 100% passive sidecar exporters. Metrics scrape operations query read-only snapshots and will never block or alter active browser session or scheduler processes.
+
+### 4. Kubernetes Manifest Readiness
+All manifests are organized under `k8s/` and ready for cluster deployment, showing clean multi-tier decoupling:
+* `namespace.yaml`: Configures the dedicated `cloudnote` isolation namespace.
+* `configmap.yaml` & `secret.yaml`: Manage environment properties and UMS login secrets.
+* `pvc.yaml`: Declares persistent storage sharing for SQLite database files and logs.
+* `redis-deployment.yaml`: Orchestrates the in-memory state caching pod.
+* `frontend-deployment.yaml` / `backend-deployment.yaml`: Standalone deployments for our web apps.
+* `ingestion-worker-deployment.yaml`: Persistent Pod daemon managing the 24/7 background scheduler loop.
+* `services.yaml`: Decoupled Services mapping network addresses to individual pods.
 
 ---
+
 
 ## 🧪 Automated Continuous Integration
 

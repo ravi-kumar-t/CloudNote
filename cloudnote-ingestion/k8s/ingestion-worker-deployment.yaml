@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudnote-ingestion-worker
+  namespace: cloudnote
+  labels:
+    app: cloudnote-ingestion-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudnote-ingestion-worker
+  template:
+    metadata:
+      labels:
+        app: cloudnote-ingestion-worker
+    spec:
+      containers:
+      - name: worker
+        image: cloudnote-ingestion:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LPU_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: ingestion-secrets
+              key: LPU_USERNAME
+        - name: LPU_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ingestion-secrets
+              key: LPU_PASSWORD
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: ingestion-config
+              key: REDIS_URL
+        - name: HEADLESS
+          valueFrom:
+            configMapKeyRef:
+              name: ingestion-config
+              key: HEADLESS
+        - name: BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: ingestion-config
+              key: BASE_URL
+        - name: DB_PATH
+          value: "/app/logs/cloudnote.db"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1000m"
+            memory: "2Gi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/logs
+          subPath: logs
+        - name: data-volume
+          mountPath: /app/screenshots
+          subPath: screenshots
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: ingestion-storage

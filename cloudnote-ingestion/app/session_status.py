@@ -23,6 +23,16 @@ def get_session_status():
             "final_session_state": None
         }
     }
+    # 1. Resilient Redis Cache read (Sidecar Integration)
+    try:
+        from .redis_service import redis_service
+        cached = redis_service.get_session_status()
+        if cached:
+            return cached
+    except Exception as redis_err:
+        logger.debug(f"SessionStatus: Failed to read from Redis cache: {redis_err}")
+
+    # 2. Local JSON File fallback (Core MVP Stability)
     if os.path.exists(STATUS_FILE):
         try:
             with open(STATUS_FILE, "r", encoding="utf-8") as f:
@@ -55,6 +65,13 @@ def reset_session_status():
         with open(STATUS_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2)
         logger.info("SessionStatus: Reset persistent session connection status to IDLE (preserved last session proof artifacts).")
+        
+        # Resilient Redis cache update (Sidecar Integration)
+        try:
+            from .redis_service import redis_service
+            redis_service.set_session_status(current)
+        except Exception as redis_err:
+            logger.debug(f"SessionStatus: Failed to sync reset status to Redis: {redis_err}")
     except Exception as e:
         logger.error(f"SessionStatus: Failed to reset session status to IDLE: {e}")
 
@@ -153,3 +170,10 @@ def update_session_status(
         logger.info(f"SessionStatus: Updated connection status to {status} (screenshot: {screenshot})")
     except Exception as e:
         logger.error(f"SessionStatus: Failed to persist session status to disk: {e}")
+
+    # Resilient Redis cache update (Sidecar Integration)
+    try:
+        from .redis_service import redis_service
+        redis_service.set_session_status(current)
+    except Exception as redis_err:
+        logger.debug(f"SessionStatus: Failed to cache update in Redis: {redis_err}")

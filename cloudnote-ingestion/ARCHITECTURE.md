@@ -6,20 +6,27 @@ This document provides a highly detailed engineering overview of the CloudNote a
 
 ## 1. High-Level Core System Architecture
 
-The following diagram illustrates the interaction between the decoupled three-tier microservice architecture:
-- **Client Layer**: Single Page Application built with React and served via Nginx.
-- **Service Layer**: REST Web API backend powered by FastAPI, responsible for serving cache details, raw logs, database records, and active state.
-- **Storage Tier**: SQLite SQLite3 database and JSON state files containing shared session data.
-- **Autonomous Ingestion Worker**: Playwright-based headless scheduler running on-demand.
+The following diagram illustrates the interaction between the decoupled microservice layers and the live production sidecar integrations:
+- **Client Layer**: Single Page Application built with React (served via Nginx) alongside the pre-built **Grafana Operational Dashboard** rendering active performance metrics.
+- **Service Layer**: REST Web API backend powered by FastAPI, responsible for serving cache details, database records, and exporting the Prometheus `/metrics` scrape endpoint.
+- **In-Memory Cache & Heartbeat Layer**: Optional Redis container holding ephemeral state caches, active connection telemetry, and periodic scheduler heartbeats.
+- **Storage Tier**: Persistent SQLite3 database and JSON state files which serve as a bulletproof local fallback if Redis is offline.
+- **Autonomous Ingestion Layer**: Playwright-based background scheduler worker managing CodeTantra student portal logins, countdown checks, and class join automated actions.
+- **Telemetry Collection Layer**: Prometheus monitoring daemon pulling scrape records from the backend and provisioning Grafana panels.
 
 ```mermaid
 graph TD
     subgraph Client Layer
-        ReactClient["React SPA (Port 80/5173)"]
+        ReactClient["React SPA (Port 80/3000)"]
+        GrafanaDashboards["Grafana dashboard (Port 3001)"]
     end
 
     subgraph Service Layer
         FastAPIServer["FastAPI Backend (Port 8000)"]
+    end
+
+    subgraph In-Memory Cache & Heartbeat
+        RedisServer[("Redis Store (Port 6379)")]
     end
 
     subgraph Storage Tier
@@ -33,20 +40,31 @@ graph TD
         LPUUMS[("LPU UMS Student Portal<br/>(CodeTantra LTI Integration)")]
     end
 
+    subgraph Telemetry Collection
+        PrometheusServer["Prometheus Server (Port 9090)"]
+    end
+
     %% Client Interactions
-    ReactClient -- "REST APIs (Auth, Status, Timetable, Screenshots)" --> FastAPIServer
+    ReactClient -- "REST APIs" --> FastAPIServer
+    GrafanaDashboards -- "Query Metrics" --> PrometheusServer
     
     %% Backend Interactions
-    FastAPIServer -- "Read/Write Queries" --> SQLiteDB
-    FastAPIServer -- "Poll Active State" --> JSONCache
+    FastAPIServer -- "Read/Write SQL" --> SQLiteDB
+    FastAPIServer -- "Read/Write State" --> RedisServer
+    FastAPIServer -- "Fallback Read/Write State" --> JSONCache
     FastAPIServer -- "Serve Proof files" --> DiskStorage
 
     %% Worker Interactions
+    PlaywrightWorker -- "Write State & Heartbeats" --> RedisServer
+    PlaywrightWorker -- "Fallback Write State" --> JSONCache
     PlaywrightWorker -- "Headless Timetable Sync" --> SQLiteDB
-    PlaywrightWorker -- "Write State & Proof Paths" --> JSONCache
     PlaywrightWorker -- "Save png captures" --> DiskStorage
     PlaywrightWorker -- "Automation & Scraping" --> LPUUMS
+
+    %% Telemetry Collection
+    PrometheusServer -- "Poll /metrics scraper" --> FastAPIServer
 ```
+
 
 ---
 

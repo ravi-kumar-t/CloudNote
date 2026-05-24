@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudnote-backend
+  namespace: cloudnote
+  labels:
+    app: cloudnote-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudnote-backend
+  template:
+    metadata:
+      labels:
+        app: cloudnote-backend
+    spec:
+      containers:
+      - name: backend
+        image: cloudnote-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: DB_PATH
+          value: "/app/logs/cloudnote.db"
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: ingestion-config
+              key: REDIS_URL
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/logs
+          subPath: logs
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: ingestion-storage

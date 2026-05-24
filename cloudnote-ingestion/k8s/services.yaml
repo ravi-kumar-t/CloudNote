@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudnote-backend
+  namespace: cloudnote
+  labels:
+    app: cloudnote-backend
+spec:
+  selector:
+    app: cloudnote-backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudnote-frontend
+  namespace: cloudnote
+  labels:
+    app: cloudnote-frontend
+spec:
+  selector:
+    app: cloudnote-frontend
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http

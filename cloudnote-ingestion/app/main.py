@@ -253,6 +253,12 @@ async def run_ingestion():
     join_failure_cooldown = 180  # 3 minutes cooldown if join/login fails
     
     while True:
+        # Resilient scheduler heartbeat update (Sidecar Integration)
+        try:
+            from .redis_service import redis_service
+            redis_service.set_scheduler_heartbeat()
+        except Exception:
+            pass
         # Check cache state
         cache_valid = timetable_cache.is_valid_for_today()
         classes = timetable_cache.get_timetable()
@@ -420,6 +426,12 @@ async def run_ingestion():
                         start_time = asyncio.get_event_loop().time()
                         
                         while True:
+                            # Resilient scheduler heartbeat update (Sidecar Integration)
+                            try:
+                                from .redis_service import redis_service
+                                redis_service.set_scheduler_heartbeat()
+                            except Exception:
+                                pass
                             await asyncio.sleep(30)
                             await extractor.extract_content(page)
                             
@@ -514,6 +526,12 @@ async def run_ingestion():
             # Execute smart sleep
             target_time = asyncio.get_event_loop().time() + sleep_duration
             while asyncio.get_event_loop().time() < target_time:
+                # Resilient scheduler heartbeat update (Sidecar Integration)
+                try:
+                    from .redis_service import redis_service
+                    redis_service.set_scheduler_heartbeat()
+                except Exception:
+                    pass
                 # Check for calendar date rollovers or manual sync requests
                 if timetable_cache.is_sync_requested() or not timetable_cache.is_valid_for_today():
                     logger.info("Unified Loop: Sleep interrupted by sync request or date rollover. Waking up!")
@@ -531,6 +549,12 @@ async def run_ingestion():
             
             target_time = asyncio.get_event_loop().time() + sleep_duration
             while asyncio.get_event_loop().time() < target_time:
+                # Resilient scheduler heartbeat update (Sidecar Integration)
+                try:
+                    from .redis_service import redis_service
+                    redis_service.set_scheduler_heartbeat()
+                except Exception:
+                    pass
                 if timetable_cache.is_sync_requested() or not timetable_cache.is_valid_for_today():
                     logger.info("Unified Loop: Sleep interrupted by sync request or date rollover. Waking up!")
                     break

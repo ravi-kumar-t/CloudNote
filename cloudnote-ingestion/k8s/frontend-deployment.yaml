@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudnote-frontend
+  namespace: cloudnote
+  labels:
+    app: cloudnote-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudnote-frontend
+  template:
+    metadata:
+      labels:
+        app: cloudnote-frontend
+    spec:
+      containers:
+      - name: frontend
+        image: cloudnote-frontend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
