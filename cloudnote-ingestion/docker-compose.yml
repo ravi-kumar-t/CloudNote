@@ -8,13 +8,20 @@ services:
       dockerfile: backend/Dockerfile
     container_name: cloudnote-backend
     restart: unless-stopped
+
     ports:
-      - "127.0.0.1:8000:8000" # Securely bind to localhost only (routed via Nginx)
+      - "127.0.0.1:8000:8000"
+
     volumes:
-      - ./logs:/app/logs # Persistent shared SQLite storage
+      - ./logs:/app/logs
+
+    env_file:
+      - .env
+
     environment:
       - DB_PATH=/app/logs/cloudnote.db
       - PYTHONUNBUFFERED=1
+
     logging:
       driver: "json-file"
       options:
@@ -28,25 +35,36 @@ services:
       dockerfile: frontend/Dockerfile
     container_name: cloudnote-frontend
     restart: unless-stopped
+
     ports:
-      - "127.0.0.1:3000:80" # Securely bind to localhost only (routed via Nginx)
+      - "127.0.0.1:3000:80"
+
     logging:
       driver: "json-file"
       options:
         max-size: "5m"
         max-file: "2"
 
-  # 3. On-Demand Playwright Ingestion Worker (triggered by Systemd Timer)
+  # 3. On-Demand Playwright Ingestion Worker
   ingestion-worker:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: cloudnote-ingestion-worker
-    init: true # Spawns tini (PID 1) to safely reap zombie Chromium/Playwright processes
-    env_file: .env
+
+    init: true
+
+    env_file:
+      - .env
+
     volumes:
-      - ./logs:/app/logs # Persistent shared SQLite storage
-      - ./screenshots:/app/screenshots # Persistent screenshots for diagnostic captures
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+
+    environment:
+      - DB_PATH=/app/logs/cloudnote.db
+      - PYTHONUNBUFFERED=1
+
     logging:
       driver: "json-file"
       options:

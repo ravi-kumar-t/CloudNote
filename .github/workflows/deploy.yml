@@ -1,0 +1,58 @@
+name: Oracle VM Production Deployment CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch: # Allow manual one-click trigger from the GitHub Actions UI
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Stack to self-hosted Oracle VM
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Execute Remote SSH Deploy Commands
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.VM_PORT || 22 }}
+          script: |
+            echo "=== CLOUDNOTE PRODUCTION CD INITIATED ==="
+            
+            # 1. Navigate to the deployment folder
+            if [ -d "/opt/cloudnote-ingestion" ]; then
+              cd /opt/cloudnote-ingestion
+            else
+              echo "ERROR: Target directory /opt/cloudnote-ingestion not found! Please run the host deploy_setup.sh script once on the VM first."
+              exit 1
+            fi
+            
+            # 2. Synchronize codebase with GitHub main/master branch
+            echo "Syncing code from GitHub repository..."
+            git fetch --all
+            
+            # Detect active branch automatically
+            BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            echo "Resetting host workspace to origin/$BRANCH..."
+            git reset --hard "origin/$BRANCH"
+            
+            # 3. Securely build and restart the 24/7 web dashboard containers
+            echo "Rebuilding and restarting web dashboard service stack..."
+            docker compose up -d --build backend frontend
+            
+            # 4. Clean up dangling images to prevent disk space exhaustion on Oracle Free Tier VM
+            echo "Pruning unused Docker layers and saving disk space..."
+            docker image prune -f
+            
+            echo "=== CLOUDNOTE PRODUCTION CD COMPLETED SUCCESSFULLY ==="

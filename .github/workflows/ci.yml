@@ -1,0 +1,66 @@
+name: CloudNote Core Integration CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  python-pipeline-verification:
+    name: Verify Ingestion & Summarization Pipeline
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudnote-ingestion
+    
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: cloudnote-ingestion/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pipeline E2E verification script
+        env:
+          LPU_USERNAME: "test_student"
+          LPU_PASSWORD: "test_password"
+        run: |
+          python verify_pipeline.py
+
+  frontend-build-verification:
+    name: Verify React Production Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudnote-ingestion/frontend
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: cloudnote-ingestion/frontend/package-lock.json
+
+      - name: Install npm dependencies
+        run: |
+          npm ci
+
+      - name: Build Vite production distribution bundle
+        run: |
+          npm run build
+

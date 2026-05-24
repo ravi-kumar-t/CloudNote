@@ -1,0 +1,33 @@
+name: CloudNote Scheduler
+
+on:
+  schedule:
+    # Run every 5 minutes during 13:00 to 16:55 UTC (6:30 PM to 10:25 PM IST)
+    - cron: '*/5 13-16 * * *'
+  workflow_dispatch: # Allow manual triggering
+
+concurrency:
+  group: cloudnote-scheduler
+  cancel-in-progress: false
+
+jobs:
+  trigger-railway:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Railway Deployment
+        run: |
+          echo "Triggering Railway Deploy Webhook..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.RAILWAY_WEBHOOK_URL }}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Successfully triggered Railway deployment."
+            echo "Status Code: $HTTP_CODE"
+            echo "Response: $BODY"
+          else
+            echo "Failed to trigger Railway deployment."
+            echo "Status Code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi

@@ -1,0 +1,48 @@
+# Git files
+.git
+.github
+
+# Local environments and secrets
+.env
+*.env
+*.local
+credentials.json
+
+# Local logs and screenshots
+logs/
+screenshots/
+*.log
+*.png
+*.jpg
+*.jpeg
+
+# Python cache & virtual environments
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# Scratch & temporary files
+scratch/
+tmp/
+temp/
+
+# Node modules & frontend build artifacts
+**/node_modules/
+frontend/dist/
+frontend/.cache/
+frontend/build/
+
+# Browser binaries & local installs
+chrome-win64/
+ms-playwright/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
