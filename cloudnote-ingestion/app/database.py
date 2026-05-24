@@ -103,12 +103,29 @@ def save_summary_to_db(username: str, summary_data: dict) -> int:
         topics_json = json.dumps(summary_data.get("topics", []))
         key_points_json = json.dumps(summary_data.get("key_points", []))
         
+        # Prevent duplicate insertions for same user, subject, and calendar day
+        today_date = timestamp[0:10]
         cursor.execute("""
-            INSERT INTO lecture_summaries (user_id, timestamp, subject, summary, topics_json, key_points_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (user_id, timestamp, subject, summary, topics_json, key_points_json))
+            SELECT id FROM lecture_summaries 
+            WHERE user_id = ? AND subject = ? AND substr(timestamp, 1, 10) = ?
+        """, (user_id, subject, today_date))
+        existing_row = cursor.fetchone()
         
-        row_id = cursor.lastrowid
+        if existing_row:
+            row_id = existing_row["id"]
+            cursor.execute("""
+                UPDATE lecture_summaries 
+                SET timestamp = ?, summary = ?, topics_json = ?, key_points_json = ?
+                WHERE id = ?
+            """, (timestamp, summary, topics_json, key_points_json, row_id))
+            logger.info(f"Database: Found existing summary for '{subject}' on {today_date}. Updated row {row_id} to prevent duplicate insertion.")
+        else:
+            cursor.execute("""
+                INSERT INTO lecture_summaries (user_id, timestamp, subject, summary, topics_json, key_points_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, timestamp, subject, summary, topics_json, key_points_json))
+            row_id = cursor.lastrowid
+        
         conn.commit()
         conn.close()
         

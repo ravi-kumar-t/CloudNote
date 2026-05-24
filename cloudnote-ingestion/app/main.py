@@ -371,6 +371,24 @@ async def run_ingestion():
                     if not join_success:
                         logger.error("Unified Loop: Failed to join class after maximum attempts.")
                         update_ingestion_status("failed", error="Failed to join active lecture")
+                        
+                        # Capture join failure screenshot
+                        now_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                        ss_filename = f"join_failed_{now_str}.png"
+                        ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
+                        try:
+                            if page and not page.is_closed():
+                                await page.screenshot(path=ss_path)
+                                logger.info(f"Join Failed: Saved validation screenshot to {ss_path}")
+                                from .session_status import update_session_status
+                                update_session_status(
+                                    status="FAILED",
+                                    screenshot=ss_filename,
+                                    disconnect_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    subject=subject
+                                )
+                        except Exception as ss_e:
+                            logger.error(f"Join Failed: Failed to capture validation screenshot: {ss_e}")
                     else:
                         logger.info("Unified Loop: Successfully joined active session. Monitoring active stream...")
                         update_ingestion_status("processing", details="Monitoring active lecture stream", subject=subject)
@@ -438,7 +456,7 @@ async def run_ingestion():
                             update_ingestion_status("processing", details="Generating AI lecture summary", subject=subject)
                             try:
                                 from .gemini_service import summarize_lecture
-                                summarize_lecture(extractor.get_raw_text())
+                                summarize_lecture(extractor.get_raw_text(), subject=subject)
                                 update_ingestion_status("completed", details="AI summary generated and persisted successfully.")
                             except Exception as sum_e:
                                 logger.error(f"Unified Loop: Summarization failed: {sum_e}")

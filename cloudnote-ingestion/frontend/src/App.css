@@ -793,6 +793,12 @@
   background: rgba(148, 163, 184, 0.1);
 }
 
+.status-badge.failed {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
 @keyframes breathing-badge {
   0% { filter: brightness(0.95); box-shadow: 0 0 4px rgba(16, 185, 129, 0.1); }
   50% { filter: brightness(1.15); box-shadow: 0 0 10px rgba(16, 185, 129, 0.35); }
@@ -1107,7 +1113,7 @@
 
 .last-session-meta-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 0.9rem;
 }
 
@@ -1199,6 +1205,268 @@
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* Active Proof Thumbnail Preview inside session-status-card */
+.active-screenshot-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-end;
+  max-width: 160px;
+}
+
+@media (max-width: 640px) {
+  .active-screenshot-preview {
+    align-items: flex-start;
+    max-width: 100%;
+    width: 100%;
+    margin-top: 1rem;
+  }
+}
+
+.screenshot-wrapper.active-proof {
+  width: 160px;
+  max-width: 100%;
+}
+
+/* Image fallback state styling */
+.img-fallback-active {
+  filter: opacity(0.85);
+  transition: all 0.3s ease;
+}
+
+/* Screenshot Modal Extensions */
+.screenshot-modal-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.screenshot-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 1.25rem;
+}
+
+@media (max-width: 768px) {
+  .screenshot-modal-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1rem;
+  }
+}
+
+.screenshot-modal-info-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(168, 85, 247, 0.05);
+  border: 1px solid rgba(168, 85, 247, 0.15);
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.825rem;
+  color: #cbd5e1;
+  line-height: 1.4;
+}
+
+.btn-download-screenshot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #a855f7, #6366f1);
+  border: none;
+  color: white;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.875rem;
+  text-decoration: none;
+  cursor: pointer;
+  box-shadow: 0 4px 15px rgba(168, 85, 247, 0.25);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.btn-download-screenshot:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(168, 85, 247, 0.4);
+  filter: brightness(1.1);
+}
+
+.btn-download-screenshot:active {
+  transform: translateY(0);
+}
+
+/* Unified System Status Monitor Card */
+.system-status-card.unified-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.25rem 2rem;
+  margin-bottom: 2rem;
+  border-radius: 12px;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  gap: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .system-status-card.unified-status {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 1.25rem;
+  }
+}
+
+.system-status-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex-grow: 1;
+}
+
+.status-indicator-block {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .status-indicator-block {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+}
+
+.status-meta-block {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.status-subject-badge {
+  background: rgba(168, 85, 247, 0.15);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  color: #d8b4fe;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+}
+
+/* Status variants */
+.system-status-card.unified-status.idle {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.4), rgba(15, 23, 42, 0.6));
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.system-status-card.unified-status.connecting {
+  background: linear-gradient(135deg, rgba(120, 113, 108, 0.25), rgba(41, 37, 36, 0.55));
+  border: 1px solid rgba(234, 179, 8, 0.25);
+  box-shadow: 0 4px 20px rgba(234, 179, 8, 0.05);
+}
+
+.system-status-card.unified-status.connected {
+  background: linear-gradient(135deg, rgba(22, 101, 52, 0.25), rgba(2, 44, 18, 0.55));
+  border: 1px solid rgba(74, 222, 128, 0.25);
+  box-shadow: 0 4px 20px rgba(74, 222, 128, 0.08);
+}
+
+.system-status-card.unified-status.recovering {
+  background: linear-gradient(135deg, rgba(154, 52, 18, 0.25), rgba(67, 20, 7, 0.55));
+  border: 1px solid rgba(249, 115, 22, 0.25);
+  box-shadow: 0 4px 20px rgba(249, 115, 22, 0.08);
+}
+
+.system-status-card.unified-status.disconnected {
+  background: linear-gradient(135deg, rgba(153, 27, 27, 0.25), rgba(69, 10, 10, 0.55));
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  box-shadow: 0 4px 20px rgba(248, 113, 113, 0.08);
+}
+
+/* Indicators */
+.status-indicator.idle {
+  color: #c084fc;
+}
+
+.pulse-circle.idle {
+  background-color: #c084fc;
+  box-shadow: 0 0 0 0 rgba(192, 132, 252, 0.7);
+  animation: pulse-purple-glow 2.5s infinite;
+}
+
+@keyframes pulse-purple-glow {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(192, 132, 252, 0.5);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(192, 132, 252, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(192, 132, 252, 0);
+  }
+}
+
+.status-indicator.connecting {
+  color: #facc15;
+}
+
+.pulse-circle.connecting {
+  background-color: #facc15;
+  box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.7);
+  animation: pulse-yellow-glow 2s infinite;
+}
+
+@keyframes pulse-yellow-glow {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.5);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(250, 204, 21, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0);
+  }
+}
+
+.status-indicator.recovering {
+  color: #fb923c;
+}
+
+.pulse-circle.recovering {
+  background-color: #fb923c;
+  box-shadow: 0 0 0 0 rgba(251, 146, 60, 0.7);
+  animation: pulse-orange-glow 2s infinite;
+}
+
+@keyframes pulse-orange-glow {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(251, 146, 60, 0.5);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(251, 146, 60, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(251, 146, 60, 0);
+  }
 }
 
 

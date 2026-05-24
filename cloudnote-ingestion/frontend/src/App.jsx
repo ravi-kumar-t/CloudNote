@@ -3,9 +3,43 @@ import { LogOut, BookOpen, Search, FileText, Calendar, Compass, ListChecks, Help
 import './App.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const SHOW_SUMMARIES = false;
+
+const formatTimestamp = (tsString) => {
+  if (!tsString) return 'N/A';
+  if (tsString.toLowerCase() === 'active') return 'Active';
+  try {
+    const dateObj = new Date(tsString.replace(/-/g, '/'));
+    if (isNaN(dateObj.getTime())) {
+      const parsed = new Date(tsString);
+      if (isNaN(parsed.getTime())) return tsString;
+      return formatDateTimeObject(parsed);
+    }
+    return formatDateTimeObject(dateObj);
+  } catch (e) {
+    return tsString;
+  }
+};
+
+const formatDateTimeObject = (dateObj) => {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const day = dateObj.getDate();
+  const month = months[dateObj.getMonth()];
+  
+  let hours = dateObj.getHours();
+  const minutes = dateObj.getMinutes();
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  const minutesStr = minutes < 10 ? '0' + minutes : minutes;
+  
+  return `${day} ${month} • ${hours}:${minutesStr} ${ampm}`;
+};
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
+  const [token, setToken] = useState
+  (localStorage.getItem('token') || '');
   const [currentUser, setCurrentUser] = useState(localStorage.getItem('username') || '');
   const [view, setView] = useState('auth'); // 'auth' or 'dashboard'
   const [authTab, setAuthTab] = useState('login'); // 'login' or 'register'
@@ -26,8 +60,30 @@ function App() {
   const [ingestionStatus, setIngestionStatus] = useState(null);
   const [timetable, setTimetable] = useState([]);
   const [sessionStatus, setSessionStatus] = useState(null);
-  const [showScreenshot, setShowScreenshot] = useState(false);
   const [modalScreenshot, setModalScreenshot] = useState(null);
+
+  const handleImageError = (e) => {
+    e.target.onerror = null;
+    e.target.src = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="600" height="400" fill="%230f111a" rx="12"/><path d="M270,160 L330,160 L330,220 L270,220 Z" fill="none" stroke="%23a855f7" stroke-width="4" stroke-linejoin="round"/><circle cx="285" cy="180" r="4" fill="%23a855f7"/><path d="M270,210 L290,190 L305,205 L320,185 L330,195" fill="none" stroke="%23a855f7" stroke-width="3" stroke-linejoin="round"/><text x="50%25" y="65%25" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="18" fill="%23a855f7" font-weight="bold">Attendance Proof Unavailable</text><text x="50%25" y="75%25" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="12" fill="%2364748b">Screenshot could not be loaded from backend storage</text></svg>`;
+  };
+
+  const getCleanDetails = () => {
+    if (timetable.length === 0) {
+      return "No classes scheduled for today.";
+    }
+    const details = (ingestionStatus && ingestionStatus.details) || '';
+    if (details.includes('Next class:')) {
+      const match = details.match(/Next class:\s*([A-Z0-9_-]+)/i);
+      if (match) {
+        const code = match[1];
+        const exists = timetable.some(c => c.subject_code.toLowerCase() === code.toLowerCase());
+        if (!exists) {
+          return "All scheduled classes for today have been completed.";
+        }
+      }
+    }
+    return details;
+  };
 
   // Timetable Fetching
   const fetchTimetable = async (authToken) => {
@@ -301,30 +357,136 @@ function App() {
         <main className="dashboard-content">
           <div className="dashboard-header">
             <div className="dashboard-welcome">
-              <h1>Lecture Summaries</h1>
-              <p>Review active summaries auto-ingested from your live CodeTantra classes.</p>
+              <h1>Student Attendance Dashboard</h1>
+              <p>Review active attendance validation proofs auto-ingested from your live CodeTantra classes.</p>
             </div>
           </div>
 
-          {/* Active Ingestion Status Banner */}
-          {ingestionStatus && (
-            <div className={`ingestion-status-banner glass-panel ${ingestionStatus.status}`}>
-              <div className="status-info">
-                <span className={`status-pulse-dot ${ingestionStatus.status}`}></span>
-                <strong style={{ textTransform: 'capitalize' }}>
-                  Bot State: {ingestionStatus.status === 'processing' ? 'Active Ingestion' : ingestionStatus.status}
-                </strong>
-                {ingestionStatus.details && <span className="status-details"> — {ingestionStatus.details}</span>}
-                {ingestionStatus.subject && <span className="status-subject"> [{ingestionStatus.subject}]</span>}
-                {ingestionStatus.error && <span className="status-error-txt"> ({ingestionStatus.error})</span>}
+          {/* Unified System Status Monitor */}
+          {ingestionStatus && sessionStatus && (
+            <div className={`system-status-card glass-panel unified-status ${
+              sessionStatus.status !== 'IDLE' ? sessionStatus.status.toLowerCase() : ingestionStatus.status
+            }`}>
+              <div className="system-status-main">
+                <div className="status-indicator-block">
+                  {(() => {
+                    if (sessionStatus.status !== 'IDLE') {
+                      switch (sessionStatus.status) {
+                        case 'CONNECTED':
+                          return (
+                            <>
+                              <span className="status-indicator connected">
+                                <span className="pulse-circle connected"></span>
+                                🟢 Connected to Class
+                              </span>
+                              <span className="status-time-lbl">
+                                Joined Class: <strong>{formatTimestamp(sessionStatus.last_join_time)}</strong>
+                              </span>
+                            </>
+                          );
+                        case 'CONNECTING':
+                          return (
+                            <>
+                              <span className="status-indicator connecting">
+                                <span className="pulse-circle connecting"></span>
+                                🟡 Connecting to Class...
+                              </span>
+                              <span className="status-time-lbl">
+                                Initializing classroom session
+                              </span>
+                            </>
+                          );
+                        case 'RECOVERING':
+                          return (
+                            <>
+                              <span className="status-indicator recovering">
+                                <span className="pulse-circle recovering"></span>
+                                🟠 Recovering Connection...
+                              </span>
+                              <span className="status-time-lbl">
+                                Executing automated recovery watchdog
+                              </span>
+                            </>
+                          );
+                        case 'DISCONNECTED':
+                          return (
+                            <>
+                              <span className="status-indicator disconnected">
+                                <span className="pulse-circle disconnected"></span>
+                                🔴 Disconnected
+                              </span>
+                              <span className="status-time-lbl">
+                                {sessionStatus.disconnect_time ? (
+                                  <>Left Class: <strong>{formatTimestamp(sessionStatus.disconnect_time)}</strong></>
+                                ) : (
+                                  'No active session currently connected.'
+                                )}
+                              </span>
+                            </>
+                          );
+                        case 'FAILED':
+                          return (
+                            <>
+                              <span className="status-indicator failed">
+                                <span className="pulse-circle failed"></span>
+                                ❌ Ingestion Failed
+                              </span>
+                              <span className="status-time-lbl">
+                                Failed at: <strong>{formatTimestamp(sessionStatus.disconnect_time || sessionStatus.last_join_time)}</strong>
+                              </span>
+                            </>
+                          );
+                      }
+                    } else {
+                      // IDLE scheduler state
+                      const isSyncing = ingestionStatus.details && ingestionStatus.details.includes('headless timetable sync');
+                      return (
+                        <>
+                          <span className={`status-indicator ${isSyncing ? 'connecting' : 'idle'}`}>
+                            <span className={`pulse-circle ${isSyncing ? 'connecting' : 'idle'}`}></span>
+                            {isSyncing ? '🟡 Timetable Syncing...' : '🟣 Scheduler Active'}
+                          </span>
+                          <span className="status-time-lbl">
+                            {getCleanDetails()}
+                          </span>
+                        </>
+                      );
+                    }
+                  })()}
+                </div>
+                
+                <div className="status-meta-block">
+                  {ingestionStatus.subject && <span className="status-subject-badge">[{ingestionStatus.subject}]</span>}
+                  {ingestionStatus.error && <span className="status-error-txt">({ingestionStatus.error})</span>}
+                  <span className="status-timestamp">Last Active: {formatTimestamp(ingestionStatus.timestamp)}</span>
+                </div>
               </div>
-              <div className="status-time">
-                <span className="status-timestamp">Last Active: {ingestionStatus.timestamp}</span>
-              </div>
+
+              {sessionStatus.status !== 'IDLE' && sessionStatus.screenshot && (
+                <div className="active-screenshot-preview">
+                  <span className="screenshot-title text-purple-accent">
+                    {sessionStatus.status === 'CONNECTED' ? '🟢 Connection Proof' :
+                     sessionStatus.status === 'FAILED' ? '❌ Failure Proof' : '🔴 Disconnect Proof'}
+                  </span>
+                  <div className="screenshot-wrapper active-proof" onClick={() => setModalScreenshot({
+                    title: sessionStatus.status === 'CONNECTED' ? '🟢 Join Success Validation Screenshot' :
+                           sessionStatus.status === 'FAILED' ? '❌ Join Failure Validation Screenshot' : '🔴 Disconnect Validation Screenshot',
+                    meta: `Timestamp: ${formatTimestamp(sessionStatus.status === 'CONNECTED' ? sessionStatus.last_join_time : sessionStatus.disconnect_time || sessionStatus.last_join_time)}`,
+                    src: `${API_BASE}/screenshots/${sessionStatus.screenshot}`
+                  })}>
+                    <img 
+                      src={`${API_BASE}/screenshots/${sessionStatus.screenshot}`} 
+                      alt="Active Validation Proof"
+                      onError={handleImageError}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* Timetable Monitor Widget */}
+          {dashboardError && <div className="auth-error">{dashboardError}</div>}
           <div className="timetable-section glass-panel">
             <div className="timetable-header">
               <div className="timetable-title">
@@ -359,102 +521,14 @@ function App() {
             )}
           </div>
 
-          {/* Live Validation Screenshot Monitoring */}
-          {sessionStatus && (
-            <div className="session-status-card glass-panel">
-              <div className="session-status-info">
-                {(() => {
-                  switch (sessionStatus.status) {
-                    case 'CONNECTED':
-                      return (
-                        <>
-                          <span className="status-indicator connected">
-                            <span className="pulse-circle connected"></span>
-                            🟢 Connected to Class
-                          </span>
-                          <span className="status-time-lbl">
-                            Last joined: <strong>{sessionStatus.last_join_time ? new Date(sessionStatus.last_join_time.replace(/-/g, '/')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}</strong>
-                          </span>
-                        </>
-                      );
-                    case 'CONNECTING':
-                      return (
-                        <>
-                          <span className="status-indicator connecting">
-                            <span className="pulse-circle connecting"></span>
-                            🟡 Connecting to Class...
-                          </span>
-                          <span className="status-time-lbl">
-                            Initializing classroom session
-                          </span>
-                        </>
-                      );
-                    case 'RECOVERING':
-                      return (
-                        <>
-                          <span className="status-indicator recovering">
-                            <span className="pulse-circle recovering"></span>
-                            🟠 Recovering Connection...
-                          </span>
-                          <span className="status-time-lbl">
-                            Executing automated reconnection watchdog
-                          </span>
-                        </>
-                      );
-                    case 'DISCONNECTED':
-                      return (
-                        <>
-                          <span className="status-indicator disconnected">
-                            <span className="pulse-circle disconnected"></span>
-                            🔴 Disconnected
-                          </span>
-                          <span className="status-time-lbl">
-                            {sessionStatus.disconnect_time ? (
-                              <>Disconnected at: <strong>{new Date(sessionStatus.disconnect_time.replace(/-/g, '/')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong></>
-                            ) : (
-                              'No active session currently connected.'
-                            )}
-                          </span>
-                        </>
-                      );
-                    case 'IDLE':
-                    default:
-                      return (
-                        <>
-                          <span className="status-indicator idle">
-                            <span className="pulse-circle idle"></span>
-                            🟣 Standby / Idle
-                          </span>
-                          <span className="status-time-lbl">
-                            Background worker monitoring schedule
-                          </span>
-                        </>
-                      );
-                  }
-                })()}
-              </div>
-              
-              {sessionStatus.screenshot && (
-                <button 
-                  className="btn-view-screenshot" 
-                  onClick={() => setModalScreenshot({
-                    title: sessionStatus.status === 'CONNECTED' ? '🟢 Join Success Validation Screenshot' : '🔴 Disconnect Validation Screenshot',
-                    meta: `Timestamp: ${sessionStatus.status === 'CONNECTED' ? sessionStatus.last_join_time : sessionStatus.disconnect_time}`,
-                    src: `${API_BASE}/screenshots/${sessionStatus.screenshot}`
-                  })}
-                >
-                  [View Screenshot]
-                </button>
-              )}
-            </div>
-          )}
+
 
           {/* Last Session Historical Card */}
-          {sessionStatus && sessionStatus.last_session && sessionStatus.last_session.joined_at && (
+          {sessionStatus && sessionStatus.last_session && (sessionStatus.last_session.joined_at || sessionStatus.last_session.latest_failure_screenshot) && (
             <div className="last-session-card glass-panel">
               <div className="last-session-header">
                 <Compass size={20} color="#a855f7" />
-                <h2>Last Ingested Session Attendance Proof</h2>
+                <h2>Last Attended Class</h2>
               </div>
               <div className="last-session-body">
                 <div className="last-session-meta-grid">
@@ -463,61 +537,84 @@ function App() {
                     <strong className="meta-val">{sessionStatus.last_session.last_completed_class || 'N/A'}</strong>
                   </div>
                   <div className="meta-item">
-                    <span className="meta-label">Session Status</span>
-                    <span className="status-badge completed">
+                    <span className="meta-label">Attendance Status</span>
+                    <span className={`status-badge ${(sessionStatus.last_session.final_session_state || 'COMPLETED').toLowerCase()}`}>
                       {sessionStatus.last_session.final_session_state || 'COMPLETED'}
                     </span>
                   </div>
                   <div className="meta-item">
-                    <span className="meta-label">Joined At</span>
-                    <strong className="meta-val">{sessionStatus.last_session.joined_at}</strong>
+                    <span className="meta-label">Joined Class</span>
+                    <strong className="meta-val">{formatTimestamp(sessionStatus.last_session.joined_at)}</strong>
                   </div>
                   <div className="meta-item">
-                    <span className="meta-label">Disconnected At</span>
-                    <strong className="meta-val">{sessionStatus.last_session.disconnected_at || 'Active'}</strong>
+                    <span className="meta-label">Left Class</span>
+                    <strong className="meta-val">{formatTimestamp(sessionStatus.last_session.disconnected_at)}</strong>
                   </div>
                   <div className="meta-item">
-                    <span className="meta-label">Total Duration</span>
+                    <span className="meta-label">Time in Class</span>
                     <strong className="meta-val">{sessionStatus.last_session.session_duration || 'N/A'}</strong>
                   </div>
                 </div>
                 
                 <div className="last-session-screenshots">
-                  {sessionStatus.last_session.latest_join_screenshot && (
-                    <div className="screenshot-preview-box">
-                      <span className="screenshot-title">🟢 Connection Check</span>
-                      <div className="screenshot-wrapper">
-                        <img 
-                          src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_join_screenshot}`} 
-                          alt="Join Screenshot" 
-                          onClick={() => {
+                  {sessionStatus.last_session.final_session_state === 'FAILED' ? (
+                    sessionStatus.last_session.latest_failure_screenshot && (
+                      <div className="screenshot-preview-box">
+                        <span className="screenshot-title">❌ Failure Proof</span>
+                        <div className="screenshot-wrapper" onClick={() => {
+                          setModalScreenshot({
+                            title: '❌ Join Failure Validation Screenshot',
+                            meta: `Timestamp: ${formatTimestamp(sessionStatus.last_session.disconnected_at)}`,
+                            src: `${API_BASE}/screenshots/${sessionStatus.last_session.latest_failure_screenshot}`
+                          });
+                        }}>
+                          <img 
+                            src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_failure_screenshot}`} 
+                            alt="Failure Screenshot" 
+                            onError={handleImageError}
+                          />
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    <>
+                      {sessionStatus.last_session.latest_join_screenshot && (
+                        <div className="screenshot-preview-box">
+                          <span className="screenshot-title">🟢 Connection Check</span>
+                          <div className="screenshot-wrapper" onClick={() => {
                             setModalScreenshot({
                               title: '🟢 Join Success Validation Screenshot',
-                              meta: `Timestamp: ${sessionStatus.last_session.joined_at}`,
+                              meta: `Timestamp: ${formatTimestamp(sessionStatus.last_session.joined_at)}`,
                               src: `${API_BASE}/screenshots/${sessionStatus.last_session.latest_join_screenshot}`
                             });
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {sessionStatus.last_session.latest_disconnect_screenshot && (
-                    <div className="screenshot-preview-box">
-                      <span className="screenshot-title">🔴 Disconnect Check</span>
-                      <div className="screenshot-wrapper">
-                        <img 
-                          src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_disconnect_screenshot}`} 
-                          alt="Disconnect Screenshot" 
-                          onClick={() => {
+                          }}>
+                            <img 
+                              src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_join_screenshot}`} 
+                              alt="Join Screenshot" 
+                              onError={handleImageError}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      {sessionStatus.last_session.latest_disconnect_screenshot && (
+                        <div className="screenshot-preview-box">
+                          <span className="screenshot-title">🔴 Disconnect Check</span>
+                          <div className="screenshot-wrapper" onClick={() => {
                             setModalScreenshot({
                               title: '🔴 Disconnect Validation Screenshot',
-                              meta: `Timestamp: ${sessionStatus.last_session.disconnected_at}`,
+                              meta: `Timestamp: ${formatTimestamp(sessionStatus.last_session.disconnected_at)}`,
                               src: `${API_BASE}/screenshots/${sessionStatus.last_session.latest_disconnect_screenshot}`
                             });
-                          }}
-                        />
-                      </div>
-                    </div>
+                          }}>
+                            <img 
+                              src={`${API_BASE}/screenshots/${sessionStatus.last_session.latest_disconnect_screenshot}`} 
+                              alt="Disconnect Screenshot" 
+                              onError={handleImageError}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -531,118 +628,140 @@ function App() {
                 <button className="btn-close" onClick={() => setModalScreenshot(null)}>
                   <X size={20} />
                 </button>
-                <h3 className="screenshot-modal-title">{modalScreenshot.title}</h3>
-                <p className="screenshot-modal-meta">{modalScreenshot.meta}</p>
+                <div className="screenshot-modal-header">
+                  <h3 className="screenshot-modal-title">{modalScreenshot.title}</h3>
+                  <p className="screenshot-modal-meta">{modalScreenshot.meta}</p>
+                </div>
                 <div className="screenshot-image-container">
                   <img 
                     src={modalScreenshot.src} 
                     alt="Validation Screenshot" 
                     className="validation-screenshot-img"
+                    onError={handleImageError}
+                  />
+                </div>
+                <div className="screenshot-modal-footer">
+                  <div className="screenshot-modal-info-banner">
+                    <ListChecks size={16} color="#a855f7" style={{ flexShrink: 0 }} />
+                    <span>Ingestion watchdog certified. This validation proof is dynamically captured by the ingestion runner to verify session attendance.</span>
+                  </div>
+                  <a 
+                    href={modalScreenshot.src} 
+                    download={modalScreenshot.title.replace(/\s+/g, '_') + '.png'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-download-screenshot"
+                  >
+                    Download Proof PNG
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {SHOW_SUMMARIES && (
+            <>
+              {/* Controls Bar */}
+              <div className="filter-bar">
+                <div className="search-wrapper">
+                  <Search className="search-icon-svg" size={20} />
+                  <input 
+                    type="text" 
+                    className="input-field search-input" 
+                    placeholder="Search topics, content, keywords..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                   />
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* Controls Bar */}
-          <div className="filter-bar">
-            <div className="search-wrapper">
-              <Search className="search-icon-svg" size={20} />
-              <input 
-                type="text" 
-                className="input-field search-input" 
-                placeholder="Search topics, content, keywords..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
-          </div>
+              {dashboardError && <div className="auth-error">{dashboardError}</div>}
 
-          {dashboardError && <div className="auth-error">{dashboardError}</div>}
+              {/* Summaries Feed Grid */}
+              {filteredSummaries.length === 0 ? (
+                <div className="empty-state glass-panel">
+                  <HelpCircle className="empty-icon" />
+                  <h3>No Summaries Found</h3>
+                  <p>Any ingested classes will automatically show up here after AI processing.</p>
+                </div>
+              ) : (
+                <div className="summaries-grid">
+                  {filteredSummaries.map((s) => (
+                    <div 
+                      key={s.id} 
+                      className="summary-card glass-panel"
+                      onClick={() => setSelectedSummary(s)}
+                    >
+                      <div className="card-header">
+                        <span className="card-subject">{s.subject}</span>
+                        <span className="card-date">
+                          <Calendar size={14} style={{ marginRight: '0.25rem', verticalAlign: 'middle' }} />
+                          {s.timestamp.split(' ')[0]}
+                        </span>
+                      </div>
+                      <p className="card-body">{s.summary}</p>
+                      <div className="card-topics">
+                        {s.topics.slice(0, 3).map((t, idx) => (
+                          <span key={idx} className="topic-badge">{t}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-          {/* Summaries Feed Grid */}
-          {filteredSummaries.length === 0 ? (
-            <div className="empty-state glass-panel">
-              <HelpCircle className="empty-icon" />
-              <h3>No Summaries Found</h3>
-              <p>Any ingested classes will automatically show up here after AI processing.</p>
-            </div>
-          ) : (
-            <div className="summaries-grid">
-              {filteredSummaries.map((s) => (
-                <div 
-                  key={s.id} 
-                  className="summary-card glass-panel"
-                  onClick={() => setSelectedSummary(s)}
-                >
-                  <div className="card-header">
-                    <span className="card-subject">{s.subject}</span>
-                    <span className="card-date">
-                      <Calendar size={14} style={{ marginRight: '0.25rem', verticalAlign: 'middle' }} />
-                      {s.timestamp.split(' ')[0]}
-                    </span>
+              {/* Detailed Summary Modal */}
+              {selectedSummary && (
+                <div className="modal-overlay" onClick={() => setSelectedSummary(null)}>
+                  <div className="modal-content glass-panel" onClick={(e) => e.stopPropagation()}>
+                    <button className="btn-close" onClick={() => setSelectedSummary(null)}>
+                      <X size={20} />
+                    </button>
+                    
+                    <h2 className="detail-subject">{selectedSummary.subject}</h2>
+                    <div className="detail-date">
+                      <Calendar size={16} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
+                      Recorded on {selectedSummary.timestamp}
+                    </div>
+
+                    <div className="detail-section">
+                      <h3>
+                        <FileText size={18} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
+                        AI Concept Abstract
+                      </h3>
+                      <p className="detail-text">{selectedSummary.summary}</p>
+                    </div>
+
+                    <div className="detail-section">
+                      <h3>
+                        <Compass size={18} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
+                        Topics Map
+                      </h3>
+                      <div className="topics-list">
+                        {selectedSummary.topics.map((t, idx) => (
+                          <span key={idx} className="topic-badge">{t}</span>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="detail-section">
+                      <h3>
+                        <ListChecks size={18} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
+                        Key Core Takeaways
+                      </h3>
+                      <ul className="points-list">
+                        {selectedSummary.key_points.map((p, idx) => (
+                          <li key={idx} className="point-item">
+                            <span className="point-bullet" />
+                            <span>{p}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   </div>
-                  <p className="card-body">{s.summary}</p>
-                  <div className="card-topics">
-                    {s.topics.slice(0, 3).map((t, idx) => (
-                      <span key={idx} className="topic-badge">{t}</span>
-                    ))}
-                  </div>
                 </div>
-              ))}
-            </div>
-          )}
-
-          {/* Detailed Summary Modal */}
-          {selectedSummary && (
-            <div className="modal-overlay" onClick={() => setSelectedSummary(null)}>
-              <div className="modal-content glass-panel" onClick={(e) => e.stopPropagation()}>
-                <button className="btn-close" onClick={() => setSelectedSummary(null)}>
-                  <X size={20} />
-                </button>
-                
-                <h2 className="detail-subject">{selectedSummary.subject}</h2>
-                <div className="detail-date">
-                  <Calendar size={16} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
-                  Recorded on {selectedSummary.timestamp}
-                </div>
-
-                <div className="detail-section">
-                  <h3>
-                    <FileText size={18} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
-                    AI Concept Abstract
-                  </h3>
-                  <p className="detail-text">{selectedSummary.summary}</p>
-                </div>
-
-                <div className="detail-section">
-                  <h3>
-                    <Compass size={18} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
-                    Topics Map
-                  </h3>
-                  <div className="topics-list">
-                    {selectedSummary.topics.map((t, idx) => (
-                      <span key={idx} className="topic-badge">{t}</span>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="detail-section">
-                  <h3>
-                    <ListChecks size={18} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
-                    Key Core Takeaways
-                  </h3>
-                  <ul className="points-list">
-                    {selectedSummary.key_points.map((p, idx) => (
-                      <li key={idx} className="point-item">
-                        <span className="point-bullet" />
-                        <span>{p}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </div>
+              )}
+            </>
           )}
         </main>
       )}

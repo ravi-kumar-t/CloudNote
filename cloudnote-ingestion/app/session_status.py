@@ -15,6 +15,7 @@ def get_session_status():
         "last_session": {
             "latest_join_screenshot": None,
             "latest_disconnect_screenshot": None,
+            "latest_failure_screenshot": None,
             "joined_at": None,
             "disconnected_at": None,
             "session_duration": None,
@@ -44,8 +45,6 @@ def reset_session_status():
     """Resets the persistent session status to a clean IDLE state on application startup while preserving last_session history."""
     try:
         current = get_session_status()
-        logger.info(f"[DEBUG_RESET] Payload BEFORE reset: {json.dumps(current, indent=2)}")
-        
         current["status"] = "IDLE"
         current["last_join_time"] = None
         current["disconnect_time"] = None
@@ -55,8 +54,6 @@ def reset_session_status():
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
         with open(STATUS_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2)
-            
-        logger.info(f"[DEBUG_RESET] Payload AFTER reset written to disk: {json.dumps(current, indent=2)}")
         logger.info("SessionStatus: Reset persistent session connection status to IDLE (preserved last session proof artifacts).")
     except Exception as e:
         logger.error(f"SessionStatus: Failed to reset session status to IDLE: {e}")
@@ -70,9 +67,6 @@ def update_session_status(
 ):
     """Updates and commits the runtime session status and persistent historical proof to logs/session_status.json."""
     current = get_session_status()
-    logger.info(f"[DEBUG_UPDATE] Input status: {status}, screenshot: {screenshot}, join_time: {join_time}, disconnect_time: {disconnect_time}, subject: {subject}")
-    logger.info(f"[DEBUG_UPDATE] Payload BEFORE update: {json.dumps(current, indent=2)}")
-    
     current["status"] = status
     
     # If transitioning to IDLE, reset active state variables but preserve history
@@ -95,6 +89,7 @@ def update_session_status(
         ls = {
             "latest_join_screenshot": None,
             "latest_disconnect_screenshot": None,
+            "latest_failure_screenshot": None,
             "joined_at": None,
             "disconnected_at": None,
             "session_duration": None,
@@ -109,12 +104,24 @@ def update_session_status(
         if screenshot:
             ls["latest_join_screenshot"] = screenshot
         ls["latest_disconnect_screenshot"] = None
+        ls["latest_failure_screenshot"] = None
         ls["disconnected_at"] = None
         ls["session_duration"] = "Active"
         ls["final_session_state"] = "CONNECTED"
         if subject:
             ls["last_completed_class"] = subject
             
+    elif status == "FAILED":
+        ls["latest_join_screenshot"] = None
+        ls["latest_disconnect_screenshot"] = None
+        ls["latest_failure_screenshot"] = screenshot
+        ls["joined_at"] = None
+        ls["disconnected_at"] = disconnect_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ls["session_duration"] = "N/A"
+        ls["final_session_state"] = "FAILED"
+        if subject:
+            ls["last_completed_class"] = subject
+
     elif status == "DISCONNECTED":
         if disconnect_time:
             ls["disconnected_at"] = disconnect_time
@@ -143,7 +150,6 @@ def update_session_status(
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
         with open(STATUS_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2)
-        logger.info(f"[DEBUG_UPDATE] Payload AFTER update written to disk: {json.dumps(current, indent=2)}")
         logger.info(f"SessionStatus: Updated connection status to {status} (screenshot: {screenshot})")
     except Exception as e:
         logger.error(f"SessionStatus: Failed to persist session status to disk: {e}")
