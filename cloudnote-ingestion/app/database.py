@@ -95,7 +95,9 @@ def save_summary_to_db(username: str, summary_data: dict) -> int:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        timestamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         subject = summary_data.get("subject", "Ingested Lecture")
         summary = summary_data.get("summary", "No summary text generated.")
         
@@ -135,23 +137,27 @@ def save_summary_to_db(username: str, summary_data: dict) -> int:
             "username": username,
             "user_id": user_id,
             "row_id": row_id,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(IST).isoformat()
         }
         logger.info(f"[STRUCTURED] {json.dumps(structured_payload)}")
         return row_id
     except Exception as db_err:
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
         # Structured log for DB write failure
         structured_payload = {
             "event": "db_write_failed",
             "username": username,
             "error": str(db_err),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(IST).isoformat()
         }
         logger.error(f"[STRUCTURED] {json.dumps(structured_payload)}")
         raise db_err
-
+ 
 def update_ingestion_status(status: str, details: str = "", subject: str = "", error: str = ""):
     """Updates logs/ingestion_status.json with the current worker state."""
+    from datetime import timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
     status_file = "logs/ingestion_status.json"
     os.makedirs(os.path.dirname(status_file), exist_ok=True)
     
@@ -160,7 +166,7 @@ def update_ingestion_status(status: str, details: str = "", subject: str = "", e
         "details": details,
         "subject": subject,
         "error": error,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     }
     
     try:

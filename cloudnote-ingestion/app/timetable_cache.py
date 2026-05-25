@@ -44,20 +44,26 @@ class TimetableCache:
 
     def is_valid_for_today(self) -> bool:
         """Checks if the cached data is fresh and corresponds to today's date."""
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
         return self.last_fetch_date == today_str
 
     def get_timetable(self):
         """Returns the cached timetable if it is valid for today, otherwise returns empty list."""
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
         if not self.is_valid_for_today():
-            logger.info(f"Cache: Data is stale or missing (last fetched: {self.last_fetch_date}, today: {datetime.now().strftime('%Y-%m-%d')}).")
+            logger.info(f"Cache: Data is stale or missing (last fetched: {self.last_fetch_date}, today: {datetime.now(IST).strftime('%Y-%m-%d')}).")
             return []
         return self.classes
 
     def set_timetable(self, classes_list):
         """Sets today's class list and immediately flushes to disk."""
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
         self.classes = classes_list
-        self.last_fetch_date = datetime.now().strftime("%Y-%m-%d")
+        self.last_fetch_date = datetime.now(IST).strftime("%Y-%m-%d")
         self.save_to_disk()
 
     def mark_stale(self):

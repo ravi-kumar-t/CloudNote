@@ -8,6 +8,10 @@ from datetime import datetime, timezone, timedelta, date, time
 import sys
 from .extractor import LectureExtractor
 
+def get_now_ist() -> datetime:
+    """Returns the current timezone-naive datetime representing India Standard Time (UTC+5:30)."""
+    return datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+
 async def create_browser_and_page(p):
     """Launches browser, context, and page with settings-defined defaults and microphone permissions."""
     logger.info("Launching browser...")
@@ -300,7 +304,7 @@ async def run_ingestion():
                     logger.info("Unified Loop: Headless browser session closed successfully.")
                     
         # Process timetable to compute next execution window
-        now = datetime.now()
+        now = get_now_ist()
         active_class = None
         next_upcoming_class = None
         min_seconds_to_start = None
@@ -379,7 +383,7 @@ async def run_ingestion():
                         update_ingestion_status("failed", error="Failed to join active lecture")
                         
                         # Capture join failure screenshot
-                        now_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                        now_str = get_now_ist().strftime("%Y-%m-%d_%H%M%S")
                         ss_filename = f"join_failed_{now_str}.png"
                         ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
                         try:
@@ -390,7 +394,7 @@ async def run_ingestion():
                                 update_session_status(
                                     status="FAILED",
                                     screenshot=ss_filename,
-                                    disconnect_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    disconnect_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
                                     subject=subject
                                 )
                         except Exception as ss_e:
@@ -403,7 +407,7 @@ async def run_ingestion():
                         await asyncio.sleep(5)
                         
                         # Capture join success screenshot
-                        now_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                        now_str = get_now_ist().strftime("%Y-%m-%d_%H%M%S")
                         ss_filename = f"join_success_{now_str}.png"
                         ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
                         try:
@@ -414,7 +418,7 @@ async def run_ingestion():
                             update_session_status(
                                 status="CONNECTED",
                                 screenshot=ss_filename,
-                                join_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                join_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
                                 subject=subject
                             )
                         except Exception as ss_e:
@@ -436,7 +440,7 @@ async def run_ingestion():
                             await extractor.extract_content(page)
                             
                             # 1. Scheduled session cutoff logic (with configurable 2 minutes grace buffer)
-                            now_time = datetime.now()
+                            now_time = get_now_ist()
                             grace_buffer = timedelta(minutes=2)
                             cutoff_time = end_dt + grace_buffer
                             
@@ -486,7 +490,7 @@ async def run_ingestion():
                         from .session_status import get_session_status, update_session_status
                         current_status = get_session_status()
                         if current_status.get("status") == "CONNECTED":
-                            now_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                            now_str = get_now_ist().strftime("%Y-%m-%d_%H%M%S")
                             ss_filename = f"disconnect_{now_str}.png"
                             ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
                             try:
@@ -499,7 +503,7 @@ async def run_ingestion():
                             update_session_status(
                                 status="DISCONNECTED",
                                 screenshot=ss_filename,
-                                disconnect_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                disconnect_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
                             )
                     except Exception as status_err:
                         logger.error(f"Failed to execute status monitoring update on disconnect: {status_err}")
@@ -514,10 +518,19 @@ async def run_ingestion():
             # We have an upcoming class. Determine smart sleep duration (until 5 minutes before start)
             start_str = next_upcoming_class.get("start_time")
             start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-            seconds_remaining = (start_dt - datetime.now()).total_seconds()
             
-            # Buffer of 5 minutes (300 seconds)
+            # Phase 3 — Trace Sleep Calculation Temporary Instrumenting
+            current_time = get_now_ist()
+            seconds_remaining = (start_dt - current_time).total_seconds()
             sleep_duration = max(seconds_remaining - 300, 30)
+            wake_time = start_dt - timedelta(minutes=5)
+            
+            logger.info("=== SCHEDULER DEBUG SLEEP TRACE ===")
+            logger.info(f"  current_time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"  class_start:  {start_str}")
+            logger.info(f"  wake_time:    {wake_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"  computed_sleep_seconds: {sleep_duration} seconds")
+            logger.info("===================================")
             
             logger.info(f"Unified Loop: Next upcoming class {next_upcoming_class.get('subject_code')} starts at {start_str}.")
             logger.info(f"Unified Loop: Entering smart sleep for {sleep_duration} seconds (waking up 5 minutes before start)...")
@@ -541,8 +554,9 @@ async def run_ingestion():
         else:
             # All scheduled classes today are finished. Sleep until the next day's refresh window (e.g. 8:00 AM)
             logger.info("Unified Loop: All scheduled classes for today have been completed successfully.")
-            tomorrow_8am = datetime.combine(date.today() + timedelta(days=1), time(8, 0))
-            sleep_duration = (tomorrow_8am - datetime.now()).total_seconds()
+            current_ist = get_now_ist()
+            tomorrow_8am = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
+            sleep_duration = (tomorrow_8am - current_ist).total_seconds()
             
             logger.info(f"Unified Loop: Entering smart sleep until tomorrow 8:00 AM ({sleep_duration} seconds) for new day rollover...")
             update_ingestion_status("idle", details="All classes completed for today. Resting until tomorrow.")
