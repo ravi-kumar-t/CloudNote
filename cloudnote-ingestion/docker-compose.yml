@@ -1,16 +1,17 @@
 version: '3.8'
 
 services:
-  # 1. 24/7 Persistent FastAPI Backend
+  # 1. FastAPI Backend
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
+
     container_name: cloudnote-backend
     restart: unless-stopped
 
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
 
     volumes:
       - ./logs:/app/logs
@@ -29,16 +30,17 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 2. 24/7 Persistent React Frontend Client
+  # 2. React Frontend
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+
     container_name: cloudnote-frontend
     restart: unless-stopped
 
     ports:
-      - "127.0.0.1:3000:80"
+      - "3000:80"
 
     logging:
       driver: "json-file"
@@ -46,12 +48,14 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # 3. On-Demand Playwright Ingestion Worker
+  # 3. Ingestion Worker
   ingestion-worker:
     build:
       context: .
       dockerfile: Dockerfile
+
     container_name: cloudnote-ingestion-worker
+    restart: unless-stopped
 
     init: true
 
@@ -73,46 +77,58 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 4. Redis Cache & Heartbeat Layer
+  # 4. Redis
   redis:
     image: redis:7-alpine
+
     container_name: cloudnote-redis
-    ports:
-      - "127.0.0.1:6379:6379"
     restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
     logging:
       driver: "json-file"
       options:
         max-size: "5m"
         max-file: "2"
 
-  # 5. Prometheus Observability Server
+  # 5. Prometheus
   prometheus:
     image: prom/prometheus:v2.51.0
+
     container_name: cloudnote-prometheus
+    restart: unless-stopped
+
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
     ports:
-      - "127.0.0.1:9090:9090"
-    restart: unless-stopped
+      - "9090:9090"
+
     logging:
       driver: "json-file"
       options:
         max-size: "5m"
         max-file: "2"
 
-  # 6. Grafana Dashboards Viz
+  # 6. Grafana
   grafana:
     image: grafana/grafana-oss:10.4.1
+
     container_name: cloudnote-grafana
+    restart: unless-stopped
+
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
       - GF_USERS_ALLOW_SIGN_UP=false
+
     ports:
-      - "127.0.0.1:3001:3000"
+      - "3001:3000"
+
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
-    restart: unless-stopped
+
     logging:
       driver: "json-file"
       options:
