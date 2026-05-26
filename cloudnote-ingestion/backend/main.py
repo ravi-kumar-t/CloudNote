@@ -327,12 +327,14 @@ def get_timetable(current_user: dict = Depends(get_current_user)):
             
         print("[DEBUG] Date match successful. Returning cached class array.")
         return classes
-    except Exception as e:
-        print(f"[DEBUG] Failed to read or parse timetable cache: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read timetable cache: {e}"
-        )
+    except Exception as parse_err:
+        print(f"[DEBUG] Cache file corrupted or failed to parse: {parse_err}. Deleting corrupted cache and returning empty list.")
+        try:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+        except Exception as del_err:
+            print(f"[DEBUG] Failed to delete corrupted cache: {del_err}")
+        return []
 
 # Trigger manual timetable sync endpoint
 @app.post("/api/timetable/sync")

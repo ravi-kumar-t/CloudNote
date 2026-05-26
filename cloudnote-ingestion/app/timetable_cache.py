@@ -27,7 +27,15 @@ class TimetableCache:
                     self.classes = data.get("classes", [])
                     logger.info(f"Cache: Loaded {len(self.classes)} classes from disk for date {self.last_fetch_date}.")
             except Exception as e:
-                logger.warning(f"Cache: Failed to load from disk: {e}")
+                logger.warning(f"Cache: Failed to load from disk due to corruption: {e}. Deleting corrupted cache and regenerating a clean state.")
+                try:
+                    if os.path.exists(CACHE_FILE):
+                        os.remove(CACHE_FILE)
+                except Exception as del_e:
+                    logger.error(f"Cache: Failed to delete corrupted cache file: {del_e}")
+                self.last_fetch_date = None
+                self.classes = []
+                self.save_to_disk()
 
     def save_to_disk(self):
         """Persists today's class list to disk."""

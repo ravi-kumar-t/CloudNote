@@ -10,14 +10,28 @@ async def open_calendar(page: Page):
     """Navigates to the class calendar."""
     logger.info("Opening class calendar...")
     try:
-        view_classes_btn = page.locator(CalendarSelectors.VIEW_CLASSES_BUTTON)
-        # Using a short timeout to prevent blocking when the button is absent in the new UI
-        await view_classes_btn.wait_for(state="visible", timeout=5000)
-        logger.info("Clicking 'View Classes' button to navigate to calendar...")
-        await view_classes_btn.click()
-        await page.wait_for_load_state("networkidle")
+        # Open Learn Anywhere dropdown
+        learn_anywhere = page.locator("text=Learn Anywhere").first
+        await learn_anywhere.wait_for(timeout=10000)
+        await learn_anywhere.click()
+
+        # Click View Meetings
+        view_meetings = page.locator("a[href='/secure/tla/m.jsp']").first
+        await view_meetings.wait_for(timeout=10000)
+        await view_meetings.click()
+
+        # Allow dynamic calendar render
+        await page.wait_for_timeout(10000)
+
+        logger.info(f"DEBUG URL AFTER NAV: {page.url}")
+
+        fc_count = await page.locator(".fc-event").count()
+        logger.info(f"DEBUG FC EVENTS AFTER NAV: {fc_count}")
+
+        calendar_count = await page.locator(".fc-view, .fc-daygrid, .fc-timegrid").count()
+        logger.info(f"DEBUG CALENDAR ELEMENTS: {calendar_count}")
     except (TimeoutError, Exception) as e:
-        logger.info(f"'View Classes' button not found or not visible: {e}. Assuming we are already on the calendar dashboard and proceeding.")
+        logger.info(f"Failed to navigate to calendar: {e}. Assuming we are already on the calendar dashboard and proceeding.")
 
 async def select_latest_event(page: Page):
     """Finds and clicks the most recent class event."""
