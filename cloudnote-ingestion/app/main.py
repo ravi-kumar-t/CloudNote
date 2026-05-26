@@ -22,7 +22,10 @@ async def create_browser_and_page(p):
             "--use-fake-device-for-media-stream",
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-gpu"
+            "--disable-gpu",
+            "--ignore-certificate-errors",
+            "--ignore-ssl-errors",
+            "--allow-running-insecure-content"
         ]
     )
     
@@ -31,12 +34,22 @@ async def create_browser_and_page(p):
     context = await browser.new_context(
         viewport={'width': 1920, 'height': 1080},
         permissions=['microphone'],
-        ignore_https_errors=True
+        ignore_https_errors=True,
+        timezone_id="Asia/Kolkata",
+        locale="en-IN"
     )
     
     page = await context.new_page()
     page.set_default_timeout(settings.BROWSER_TIMEOUT)
     page.set_default_navigation_timeout(settings.NAVIGATION_TIMEOUT)
+    
+    logger.info(
+        f"PLAYWRIGHT TIMEZONE: {await page.evaluate('Intl.DateTimeFormat().resolvedOptions().timeZone')}"
+    )
+    logger.info(
+        f"PLAYWRIGHT DATE: {await page.evaluate('new Date().toString()')}"
+    )
+    
     return browser, context, page
 
 async def check_lecture_completion(page) -> bool:
@@ -264,9 +277,18 @@ async def run_ingestion():
         except Exception:
             pass
         # Check cache state
-        cache_valid = timetable_cache.is_valid_for_today()
         classes = timetable_cache.get_timetable()
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        cache_valid = (
+            timetable_cache.last_fetch_date == today_str
+            and len(classes) > 0
+        )
         sync_requested = timetable_cache.is_sync_requested()
+        
+        logger.info(f"DEBUG CACHE CLASS COUNT: {len(classes)}")
+        logger.info(f"DEBUG CACHE VALID: {cache_valid}")
         
         # If cache is missing, stale, or sync is manually requested, run a Headless Unified Fetch
         if not cache_valid or sync_requested:
@@ -280,14 +302,30 @@ async def run_ingestion():
                 logger.info("Unified Loop: Launching headless browser for sync session...")
                 browser = await p.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--ignore-certificate-errors",
+                        "--ignore-ssl-errors",
+                        "--allow-running-insecure-content"
+                    ]
                 )
                 context = await browser.new_context(
                     ignore_https_errors=True,
-                    viewport={'width': 1920, 'height': 1080}
+                    viewport={'width': 1920, 'height': 1080},
+                    timezone_id="Asia/Kolkata",
+                    locale="en-IN"
                 )
                 page = await context.new_page()
                 page.set_default_timeout(settings.BROWSER_TIMEOUT)
+                
+                logger.info(
+                    f"PLAYWRIGHT TIMEZONE: {await page.evaluate('Intl.DateTimeFormat().resolvedOptions().timeZone')}"
+                )
+                logger.info(
+                    f"PLAYWRIGHT DATE: {await page.evaluate('new Date().toString()')}"
+                )
                 
                 try:
                     await perform_login(page)

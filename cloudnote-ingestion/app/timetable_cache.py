@@ -55,7 +55,7 @@ class TimetableCache:
         from datetime import timezone, timedelta
         IST = timezone(timedelta(hours=5, minutes=30))
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
-        return self.last_fetch_date == today_str
+        return self.last_fetch_date == today_str and len(self.classes) > 0
 
     def get_timetable(self):
         """Returns the cached timetable if it is valid for today, otherwise returns empty list."""

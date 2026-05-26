@@ -33,81 +33,129 @@ async def fetch_timetable_data(page: Page) -> list:
     classes = []
     
     async def extract_visible_cards(base_date: date):
-        # Focus strictly on top-level FullCalendar event cards (anchors or divs)
-        event_selector = "a.fc-event, div.fc-event"
-        locators = await page.locator(event_selector).all()
-        logger.info(f"Timetable Scraper: Detected {len(locators)} top-level fc-event cards for {base_date.strftime('%Y-%m-%d')}.")
+        event_selector = "a.fc-time-grid-event.fc-event"
         
-        for i, loc in enumerate(locators):
+        # 1. Snapshot all visible event data FIRST before opening any modal
+        logger.info(f"Timetable Scraper: Snapshotting visible cards for {base_date.strftime('%Y-%m-%d')}...")
+        try:
+            await page.wait_for_selector(event_selector, timeout=5000)
+        except Exception:
+            pass
+            
+        event_cards = await page.locator("a.fc-time-grid-event.fc-event").all()
+        valid_cards = []
+        for card in event_cards:
             try:
-                classes_attr = await loc.get_attribute("class") or ""
+                box = await card.bounding_box()
+                if not box:
+                    continue
+                # ignore invisible / collapsed / recycled cards
+                if box["width"] < 50 or box["height"] < 20:
+                    continue
+                text = (await card.inner_text()).strip()
+                if not text:
+                    continue
+                valid_cards.append({
+                    "text": text,
+                    "box": box,
+                    "html": await card.evaluate("(e) => e.outerHTML")
+                })
+            except Exception:
+                continue
+                
+        logger.info(f"VISIBLE VALID EVENT COUNT: {len(valid_cards)}")
+        
+        # 2. Iterate over valid_cards
+        for i, item in enumerate(valid_cards):
+            card_text = item["text"]
+            box = item["box"]
+            card_html = item["html"]
+            
+            logger.info(f"VISIBLE EVENT HTML: {card_html}")
+            
+            try:
+                # 3. Re-query the DOM fresh inside each iteration using only strict selector
+                loc = page.locator(event_selector).nth(i)
+                
                 is_visible = await loc.is_visible()
                 box = await loc.bounding_box()
                 
                 if not is_visible or not box:
-                    continue
-                if "fc-mirror-container" in classes_attr or "placeholder" in classes_attr.lower() or "fc-bgevent" in classes_attr:
-                    continue
-                if box["width"] == 0 or box["height"] == 0:
+                    logger.warning(f"Timetable Scraper: Re-queried card [{i}] is no longer visible or present.")
                     continue
                 
-                # Extract DOM diagnostics for debugging headless VM anomalies
-                outer_html = await loc.evaluate("el => el.outerHTML")
-                card_text = await loc.inner_text() or ""
-                logger.info(f"Timetable Scraper: Card [{i}] details -> Vis: {is_visible} | Box: {box} | Class: {classes_attr}")
-                logger.info(f"Timetable Scraper: Card [{i}] outerHTML: {outer_html}")
-                logger.info(f"Timetable Scraper: Card [{i}] innerText: {repr(card_text)}")
+                # Snapshot details BEFORE click to avoid stale locator exceptions after DOM re-renders
+                card_href = (await loc.get_attribute("href")) or ""
                 
-                # --- Layered Defense Timing Extraction ---
-                timings_str = ""
+                # Requested Diagnostics logs
+                logger.info(f"VISIBLE EVENT COUNT: {len(valid_cards)}")
+                logger.info(f"EVENT TEXT: {card_text.strip()}")
+                logger.info(f"EVENT BBOX: {box}")
+                logger.info(f"EVENT HTML: {card_html[:1000]}")
                 
-                # Layer A: Check data-full and data-start attributes on all sub-containers matching time patterns
-                time_locators = await loc.locator("div.fc-time, .fc-time, [class*='time']").all()
-                found_time_values = []
-                for t_loc in time_locators:
-                    t_text = await t_loc.inner_text() or ""
-                    t_df = await t_loc.get_attribute("data-full") or ""
-                    t_ds = await t_loc.get_attribute("data-start") or ""
-                    found_time_values.append(f"[text={repr(t_text)}, data-full={repr(t_df)}, data-start={repr(t_ds)}]")
-                    
-                    if t_df.strip():
-                        timings_str = t_df.strip()
+                # --- NEW EXTRACTION FLOW: CLICK & EXPAND MODAL ---
+                logger.info(f"Timetable Scraper: Clicking event card [{i}] to expand details modal...")
+                await loc.click()
+                
+                # Wait for expanded modal/panel/details container
+                try:
+                    await page.wait_for_selector("text=/Class Timings|Status|Not started yet/i", timeout=5000)
+                except Exception as wait_e:
+                    logger.warning(f"Timetable Scraper: Modal didn't show expected text: {wait_e}")
+                
+                # Extract timings ONLY from expanded content
+                modal_selectors = ["div[role='dialog']", "div.modal", ".modal-content", ".ui-dialog", "body"]
+                modal_text = ""
+                for selector in modal_selectors:
+                    modal_el = page.locator(selector).first
+                    if await modal_el.count() > 0 and await modal_el.is_visible():
+                        modal_text = await modal_el.inner_text()
                         break
-                    elif t_ds.strip() and not timings_str:
-                        timings_str = t_ds.strip()
-                        
-                logger.info(f"Timetable Scraper: Card [{i}] nested time components found: {found_time_values}")
+                if not modal_text:
+                    modal_text = await page.inner_text("body")
+                    
+                logger.debug(f"Timetable Scraper: Modal raw inner text (first 1000 chars): {modal_text[:1000]}")
                 
-                # Layer B: Check data-full or data-start directly on the parent event card
-                if not timings_str:
-                    card_df = await loc.get_attribute("data-full")
-                    card_ds = await loc.get_attribute("data-start")
-                    if card_df:
-                        timings_str = card_df.strip()
-                    elif card_ds:
-                        timings_str = card_ds.strip()
-                
-                # Layer C: Check card's aria-label attribute
-                if not timings_str:
-                    aria_lbl = await loc.get_attribute("aria-label")
-                    if aria_lbl and ("-" in aria_lbl or "to" in aria_lbl):
-                        timings_str = aria_lbl.strip()
-                        logger.info(f"Timetable Scraper: Card [{i}] timing resolved from aria-label: {repr(timings_str)}")
-                
-                # Layer D: Fallback to card's first line of text
-                if not timings_str:
-                    lines = [l.strip() for l in card_text.split("\n") if l.strip()]
-                    if lines:
-                        timings_str = lines[0]
-                
-                # Retrieve course details (from fc-title or overall card text)
-                title_el = loc.locator("div.fc-title, .fc-title")
-                title_text = ""
-                if await title_el.count() > 0:
-                    title_text = (await title_el.first.inner_text()).strip()
+                # Regex parsing of real timings
+                import re
+                timings_str = ""
+                # Try Pattern A: "26 May 20:00 - 26 May 21:00"
+                match_a = re.search(r'\b\d{1,2}\s+[a-zA-Z]+\s+(\d{1,2}:\d{2})\s*-\s*\d{1,2}\s+[a-zA-Z]+\s+(\d{1,2}:\d{2})\b', modal_text)
+                if match_a:
+                    timings_str = f"{match_a.group(1)} - {match_a.group(2)}"
+                    logger.info(f"Timetable Scraper: Timing extracted using Pattern A (real modal): {timings_str}")
                 else:
-                    title_text = card_text.strip()
+                    # Fallback Pattern B: "12:00 PM - 01:00 PM"
+                    match_b = re.search(r'(\d{1,2}:\d{2}\s*(?:AM|PM)?\s*-\s*\d{1,2}:\d{2}\s*(?:AM|PM)?)', modal_text, re.IGNORECASE)
+                    if match_b:
+                        timings_str = match_b.group(1).strip()
+                        logger.info(f"Timetable Scraper: Timing extracted using Pattern B (real modal): {timings_str}")
                 
+                # Close the modal dialog
+                try:
+                    close_btn = page.locator("button[aria-label='Close'], .close, .ui-dialog-titlebar-close, button:has-text('Close'), a:has-text('Close')").first
+                    if await close_btn.count() > 0 and await close_btn.is_visible():
+                        await close_btn.click()
+                    else:
+                        await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(1000)
+                except Exception as close_err:
+                    logger.warning(f"Timetable Scraper: Failed to close modal: {close_err}")
+                
+                # --- Layered Defense Timing Extraction (Fallback) ---
+                if not timings_str:
+                    logger.warning("Timetable Scraper: Could not resolve timings from modal. Using collapsed tile fallbacks.")
+                    time_match = re.search(r'(\d{1,2}:\d{2}\s*(?:AM|PM)?\s*-\s*\d{1,2}:\d{2}\s*(?:AM|PM)?)', card_text, re.IGNORECASE)
+                    if time_match:
+                        timings_str = time_match.group(1).strip()
+                    else:
+                        lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                        if lines:
+                            timings_str = lines[0]
+                
+                # Retrieve course details (from overall card text)
+                title_text = card_text.strip()
+                    
                 logger.info(f"Timetable Scraper: Processing raw event timings: {timings_str} | Title: {title_text}")
                 
                 parsed = parse_event_card(f"{timings_str}\n{title_text}")
@@ -120,10 +168,9 @@ async def fetch_timetable_data(page: Page) -> list:
                     parsed["start_time"] = start_dt.strftime("%Y-%m-%d %H:%M:%S") if start_dt else ""
                     parsed["end_time"] = end_dt.strftime("%Y-%m-%d %H:%M:%S") if end_dt else ""
                     
-                    # Store direct join url if present in href
-                    href = await loc.get_attribute("href")
-                    if href:
-                        parsed["join_url"] = href
+                    # Store direct join url if present in card_href
+                    if card_href:
+                        parsed["join_url"] = card_href
                         
                     # Ensure subject_code unique index key
                     parsed_key = f"{parsed['subject_code']}_{parsed['start_time']}"
@@ -133,7 +180,7 @@ async def fetch_timetable_data(page: Page) -> list:
                         classes.append(parsed)
                         logger.info(f"Timetable Scraper: Parsed class: {parsed['subject_code']} | Timings: {parsed['timings']} | Status: {parsed['status']}")
             except Exception as loc_e:
-                logger.warning(f"Timetable Scraper: Failed to parse locator {i}: {loc_e}")
+                logger.warning(f"Timetable Scraper: Failed to process card {i}: {loc_e}")
 
     # Step A: Extract Today's classes
     today = date.today()

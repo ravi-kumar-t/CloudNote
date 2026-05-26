@@ -6,7 +6,12 @@ from .selectors import LoginSelectors
 async def perform_login(page: Page):
     """Handles the login flow for LPU MyClass."""
     logger.info(f"Navigating to {settings.BASE_URL}")
-    await page.goto(settings.BASE_URL, wait_until="networkidle")
+    await page.goto(
+        settings.BASE_URL,
+        wait_until="domcontentloaded",
+        timeout=60000
+    )
+    logger.info(f"DEBUG CURRENT URL: {page.url}")
     
     logger.info("Filling login credentials...")
     try:

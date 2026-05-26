@@ -63,7 +63,7 @@ async def select_latest_event(page: Page):
     valid_events = []
     for attempt in range(3):
         try:
-            candidate_locators = await page.locator("div.fc-event, div.calendar-event, div[class*='event'], a.fc-event, a.fc-time-grid-event").all()
+            candidate_locators = await page.locator("div.fc-event, div.calendar-event, div[class*='event'], a.fc-event, a.fc-time-grid-event, .fc-event-main, .fc-content, .fc-timegrid-event, .fc-time-grid-event").all()
             
             logger.info(f"Attempt {attempt+1}: Detected {len(candidate_locators)} raw candidate locators.")
             
@@ -71,27 +71,61 @@ async def select_latest_event(page: Page):
             for i, loc in enumerate(candidate_locators):
                 try:
                     classes = await loc.get_attribute("class") or ""
-                    text_content = await loc.inner_text() or ""
                     is_visible = await loc.is_visible()
                     box = await loc.bounding_box()
                     
-                    # Add diagnostic logging (DEBUG ONLY)
-                    if settings.DEBUG_MODE:
-                        box_str = f"x:{box['x']:.1f}, y:{box['y']:.1f}, w:{box['width']:.1f}, h:{box['height']:.1f}" if box else "None"
-                        logger.info(f"Candidate {i} Diagnostics -> Classes: '{classes}' | Text: '{text_content.strip()}' | Visible: {is_visible} | BoundingBox: {box_str}")
+                    # Fetch style and positioning metrics from DOM via JS
+                    metrics = {}
+                    if is_visible and box:
+                        try:
+                            metrics = await loc.evaluate("""el => {
+                                const style = window.getComputedStyle(el);
+                                const rect = el.getBoundingClientRect();
+                                return {
+                                    outerHTML: el.outerHTML,
+                                    innerText: el.innerText,
+                                    opacity: style.opacity,
+                                    display: style.display,
+                                    visibility: style.visibility,
+                                    transform: style.transform,
+                                    top: rect.top,
+                                    left: rect.left,
+                                    width: rect.width,
+                                    height: rect.height
+                                };
+                            }""")
+                        except Exception as eval_err:
+                            logger.debug(f"Failed to evaluate style metrics for card {i}: {eval_err}")
                     
-                    if not is_visible:
+                    if not is_visible or not box:
                         continue
                         
                     if "fc-mirror-container" in classes or "placeholder" in classes.lower() or "fc-bgevent" in classes:
                         continue
                         
-                    if not text_content.strip():
+                    # Height > 20 and Width > 100 constraint
+                    if box["height"] <= 20 or box["width"] <= 100:
                         continue
                         
-                    if not box or box["width"] == 0 or box["height"] == 0:
+                    # Style-based and offscreen position rejection
+                    if metrics:
+                        if metrics.get("display") == "none" or metrics.get("visibility") == "hidden" or metrics.get("opacity") == "0":
+                            continue
+                        if metrics.get("top", 0) < 0 or metrics.get("left", 0) < 0:
+                            continue
+                    
+                    outer_html = metrics.get("outerHTML") if metrics else (await loc.evaluate("el => el.outerHTML"))
+                    card_text = metrics.get("innerText") if metrics else (await loc.inner_text() or "")
+                    
+                    if not card_text.strip():
                         continue
                         
+                    # Requested Diagnostics logs
+                    logger.info(f"VISIBLE EVENT COUNT: {len(candidate_locators)}")
+                    logger.info(f"EVENT TEXT: {card_text.strip()}")
+                    logger.info(f"EVENT BBOX: {box}")
+                    logger.info(f"EVENT HTML: {outer_html[:1000]}")
+                    
                     valid_events.append(loc)
                 except Exception as eval_err:
                     logger.warning(f"Failed to evaluate candidate {i}: {eval_err}")
