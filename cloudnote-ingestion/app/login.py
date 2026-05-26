@@ -32,8 +32,14 @@ async def perform_login(page: Page):
         
         await page.wait_for_timeout(15000)
         
+        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        
         logger.info(f"POST LOGIN URL: {page.url}")
-        logger.info(f"POST LOGIN TITLE: {await page.title()}")
+        
+        try:
+            logger.info(f"POST LOGIN TITLE: {await page.title()}")
+        except Exception:
+            logger.info("POST LOGIN TITLE unavailable due to navigation transition.")
         logger.info("Login process completed.")
         
     except Exception as e:
