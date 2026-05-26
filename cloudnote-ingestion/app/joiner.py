@@ -605,7 +605,14 @@ async def join_class_pipeline(page: Page, join_url: str = None):
                 target_url = join_url
                 
             logger.info(f"[JOIN_PHASE] Opening lecture join URL: {target_url}")
-            await page.goto(target_url, wait_until="networkidle", timeout=60000)
+            await page.goto(
+                target_url,
+                wait_until="commit",
+                timeout=180000
+            )
+            await page.wait_for_timeout(15000)
+            logger.info(f"PLAYWRIGHT URL AFTER GOTO: {page.url}")
+            logger.info(f"PLAYWRIGHT TITLE: {await page.title()}")
             logger.info(f"[JOIN_PHASE] Navigation complete. Final page URL: {page.url}")
             
             # Wait for content container

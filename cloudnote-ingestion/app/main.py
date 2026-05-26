@@ -20,12 +20,24 @@ async def create_browser_and_page(p):
         args=[
             "--use-fake-ui-for-media-stream", 
             "--use-fake-device-for-media-stream",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
             "--ignore-certificate-errors",
             "--ignore-ssl-errors",
-            "--allow-running-insecure-content"
+            "--allow-running-insecure-content",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-dev-tools",
+            "--no-first-run",
+            "--disable-default-apps",
+            "--disable-popup-blocking",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+            "--disable-ipc-flooding-protection",
+            "--disable-features=site-per-process",
+            "--no-sandbox"
         ]
     )
     
@@ -303,12 +315,24 @@ async def run_ingestion():
                 browser = await p.chromium.launch(
                     headless=True,
                     args=[
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
                         "--ignore-certificate-errors",
                         "--ignore-ssl-errors",
-                        "--allow-running-insecure-content"
+                        "--allow-running-insecure-content",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-sync",
+                        "--disable-dev-tools",
+                        "--no-first-run",
+                        "--disable-default-apps",
+                        "--disable-popup-blocking",
+                        "--disable-renderer-backgrounding",
+                        "--disable-background-timer-throttling",
+                        "--disable-ipc-flooding-protection",
+                        "--disable-features=site-per-process",
+                        "--no-sandbox"
                     ]
                 )
                 context = await browser.new_context(

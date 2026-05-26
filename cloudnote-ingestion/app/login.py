@@ -8,10 +8,12 @@ async def perform_login(page: Page):
     logger.info(f"Navigating to {settings.BASE_URL}")
     await page.goto(
         settings.BASE_URL,
-        wait_until="domcontentloaded",
-        timeout=60000
+        wait_until="commit",
+        timeout=180000
     )
-    logger.info(f"DEBUG CURRENT URL: {page.url}")
+    await page.wait_for_timeout(15000)
+    logger.info(f"PLAYWRIGHT URL AFTER GOTO: {page.url}")
+    logger.info(f"PLAYWRIGHT TITLE: {await page.title()}")
     
     logger.info("Filling login credentials...")
     try:
