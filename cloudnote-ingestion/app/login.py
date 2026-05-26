@@ -22,16 +22,19 @@ async def perform_login(page: Page):
         await page.fill(LoginSelectors.PASSWORD_INPUT, settings.LPU_PASSWORD)
         
         logger.info("Clicking login button...")
-        await page.click(LoginSelectors.LOGIN_BUTTON)
         
-        # Verify login success by waiting for a post-login element
-        # Here we can wait for the 'View Classes' button or similar dashboard element
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(3000)  # Page stabilization wait after login
+        login_button = page.locator(
+            "button[type='submit'], button:has-text('Login'), button"
+        ).first
         
-        current_url = page.url
-        logger.info(f"Post-login current URL: {current_url}")
+        await login_button.click(no_wait_after=True)
         
+        logger.info("Login click executed without auto wait.")
+        
+        await page.wait_for_timeout(15000)
+        
+        logger.info(f"POST LOGIN URL: {page.url}")
+        logger.info(f"POST LOGIN TITLE: {await page.title()}")
         logger.info("Login process completed.")
         
     except Exception as e:
