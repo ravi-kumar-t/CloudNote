@@ -17,9 +17,8 @@ async def perform_login(page: Page):
     
     logger.info("Filling login credentials...")
     try:
-        await page.wait_for_selector(LoginSelectors.USERNAME_INPUT, timeout=settings.BROWSER_TIMEOUT)
-        await page.fill(LoginSelectors.USERNAME_INPUT, settings.LPU_USERNAME)
-        await page.fill(LoginSelectors.PASSWORD_INPUT, settings.LPU_PASSWORD)
+        await page.locator(LoginSelectors.USERNAME_INPUT).fill(settings.LPU_USERNAME)
+        await page.locator(LoginSelectors.PASSWORD_INPUT).fill(settings.LPU_PASSWORD)
         
         logger.info("Clicking login button...")
         
@@ -27,9 +26,9 @@ async def perform_login(page: Page):
             "button[type='submit'], button:has-text('Login'), button"
         ).first
         
-        await login_button.click(no_wait_after=True)
+        await login_button.dispatch_event("click")
         
-        logger.info("Login click executed without auto wait.")
+        logger.info("Login click dispatched.")
         
         await page.wait_for_timeout(15000)
         
