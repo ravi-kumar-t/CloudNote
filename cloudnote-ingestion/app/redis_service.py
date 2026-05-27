@@ -16,9 +16,12 @@ class RedisService:
         self._connection_failed = False
         self._last_conn_attempt = 0
         self._conn_retry_cooldown = 10  # Seconds to wait before attempting reconnect
+        self.redis_warning_shown = False
 
     def _get_client(self) -> Optional[redis.Redis]:
         """Lazy-loads the Redis connection with strict throttling on reconnect attempts."""
+        if settings.DEMO_MODE:
+            return None
         if not settings.REDIS_URL:
             return None
 
@@ -43,7 +46,9 @@ class RedisService:
             except Exception as e:
                 self.redis_client = None
                 self._connection_failed = True
-                logger.warning(f"Redis Service: Redis server unreachable. Operating in LOCAL FALLBACK mode. Detail: {e}")
+                if not self.redis_warning_shown:
+                    logger.warning(f"Redis Service: Redis server unreachable. Operating in LOCAL FALLBACK mode. Detail: {e}")
+                    self.redis_warning_shown = True
 
         return self.redis_client
 

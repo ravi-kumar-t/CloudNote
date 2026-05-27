@@ -12,6 +12,9 @@ def get_session_status():
         "last_join_time": None,
         "disconnect_time": None,
         "screenshot": None,
+        "latest_screenshot": None,
+        "latest_event": "IDLE",
+        "timestamp": None,
         "last_session": {
             "latest_join_screenshot": None,
             "latest_disconnect_screenshot": None,
@@ -23,33 +26,32 @@ def get_session_status():
             "final_session_state": None
         }
     }
-    # 1. Resilient Redis Cache read (Sidecar Integration)
-    try:
-        from .redis_service import redis_service
-        cached = redis_service.get_session_status()
-        if cached:
-            return cached
-    except Exception as redis_err:
-        logger.debug(f"SessionStatus: Failed to read from Redis cache: {redis_err}")
+    # 1. Local JSON File first (Core MVP Stability & Manual Testing Support)
+    if not os.path.exists(STATUS_FILE):
+        return default_state
 
-    # 2. Local JSON File fallback (Core MVP Stability)
-    if os.path.exists(STATUS_FILE):
-        try:
-            with open(STATUS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # Safeguard: merge with default_state to ensure all keys exist
-                if "last_session" not in data:
-                    data["last_session"] = default_state["last_session"]
-                else:
-                    # Deep merge default keys to prevent any missing keys inside last_session
-                    for k, v in default_state["last_session"].items():
-                        if k not in data["last_session"]:
-                            data["last_session"][k] = v
-                return data
-        except Exception as e:
-            logger.warning(f"SessionStatus: Failed to load cache file: {e}")
-            
-    return default_state
+    if os.path.getsize(STATUS_FILE) == 0:
+        return default_state
+
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"SessionStatus: Failed to load cache file: {e}")
+        return default_state
+
+    # Safeguard: merge with default_state to ensure all keys exist
+    for k, v in default_state.items():
+        if k not in data:
+            data[k] = v
+    if "last_session" not in data:
+        data["last_session"] = default_state["last_session"]
+    else:
+        # Deep merge default keys to prevent any missing keys inside last_session
+        for k, v in default_state["last_session"].items():
+            if k not in data["last_session"]:
+                data["last_session"][k] = v
+    return data
 
 def reset_session_status():
     """Resets the persistent session status to a clean IDLE state on application startup while preserving last_session history."""
@@ -59,6 +61,9 @@ def reset_session_status():
         current["last_join_time"] = None
         current["disconnect_time"] = None
         current["screenshot"] = None
+        current["latest_screenshot"] = None
+        current["latest_event"] = "IDLE"
+        current["timestamp"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         # Keep current["last_session"] completely untouched!
         
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
@@ -75,30 +80,137 @@ def reset_session_status():
     except Exception as e:
         logger.error(f"SessionStatus: Failed to reset session status to IDLE: {e}")
 
+HISTORY_FILE = "logs/class_history.json"
+
+def append_to_history(entry: dict):
+    history = []
+    if not os.path.exists(HISTORY_FILE):
+        history = []
+    elif os.path.getsize(HISTORY_FILE) == 0:
+        history = []
+    else:
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+                if not isinstance(history, list):
+                    history = []
+        except Exception as e:
+            logger.warning(f"SessionStatus: Failed to load history file: {e}")
+            history = []
+            
+    # Prevent duplicate identical entries
+    if history and history[-1].get("subject") == entry.get("subject") and history[-1].get("ended_at") == entry.get("ended_at"):
+        logger.debug("SessionStatus: History entry already exists, skipping duplicate append.")
+        return
+        
+    history.append(entry)
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+        logger.info(f"SessionStatus: Appended class to history: {entry.get('subject')} (status: {entry.get('status')})")
+    except Exception as e:
+        logger.error(f"SessionStatus: Failed to append to history log: {e}")
+
 def update_session_status(
     status: str, 
     screenshot: str = None, 
     join_time: str = None, 
     disconnect_time: str = None,
-    subject: str = None
+    subject: str = None,
+    title: str = None,
+    instructor: str = None
 ):
     """Updates and commits the runtime session status and persistent historical proof to logs/session_status.json."""
     current = get_session_status()
     current["status"] = status
+    
+    # Track class metadata
+    if subject:
+        current["subject"] = subject
+    if title:
+        current["title"] = title
+    if instructor:
+        current["instructor"] = instructor
+    
+    # Map status to latest_event directly
+    latest_event = "IDLE"
+    if status == "CONNECTED":
+        latest_event = "CONNECTED"
+    elif status == "FAILED":
+        latest_event = "FAILED"
+    elif status == "DISCONNECTED":
+        latest_event = "DISCONNECTED"
+    elif status == "CONNECTING":
+        latest_event = "CONNECTING"
+    elif status == "FACULTY_NOT_STARTED":
+        latest_event = "FACULTY_NOT_STARTED"
+        
+    current["latest_event"] = latest_event
+    current["timestamp"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     
     # If transitioning to IDLE, reset active state variables but preserve history
     if status == "IDLE":
         current["last_join_time"] = None
         current["disconnect_time"] = None
         current["screenshot"] = None
+        current["latest_screenshot"] = None
+        current["subject"] = None
+        current["title"] = None
+        current["instructor"] = None
+        current["joined_at"] = None
     else:
         if screenshot:
             current["screenshot"] = screenshot
+            current["latest_screenshot"] = f"/screenshots/{screenshot}"
         if join_time:
             current["last_join_time"] = join_time
+            current["joined_at"] = join_time.replace(" ", "T")
             current["disconnect_time"] = None  # Reset disconnect time on new join
         if disconnect_time:
             current["disconnect_time"] = disconnect_time
+
+    # Persistent log appender for completed lifecycles
+    if status == "FAILED":
+        entry = {
+            "subject": current.get("subject") or subject or "Lecture",
+            "title": current.get("title") or "Class Lecture",
+            "instructor": current.get("instructor") or "N/A",
+            "status": "FAILED",
+            "joined_at": None,
+            "ended_at": current["timestamp"],
+            "screenshots": {
+                "failure": f"/screenshots/{screenshot}" if screenshot else None
+            }
+        }
+        append_to_history(entry)
+    elif status == "FACULTY_NOT_STARTED":
+        entry = {
+            "subject": current.get("subject") or subject or "Lecture",
+            "title": current.get("title") or "Class Lecture",
+            "instructor": current.get("instructor") or "N/A",
+            "status": "FACULTY_NOT_STARTED",
+            "joined_at": None,
+            "ended_at": current["timestamp"],
+            "screenshots": {
+                "connected": f"/screenshots/{screenshot}" if screenshot else None
+            }
+        }
+        append_to_history(entry)
+    elif status == "DISCONNECTED":
+        entry = {
+            "subject": current.get("subject") or "Lecture",
+            "title": current.get("title") or "Class Lecture",
+            "instructor": current.get("instructor") or "N/A",
+            "status": "CONNECTED", # status remains CONNECTED as per spec
+            "joined_at": current.get("joined_at") or (current.get("last_join_time").replace(" ", "T") if current.get("last_join_time") else None),
+            "ended_at": current["timestamp"],
+            "screenshots": {
+                "connected": current.get("latest_screenshot") if current.get("latest_screenshot") else None,
+                "disconnect": f"/screenshots/{screenshot}" if screenshot else None
+            }
+        }
+        append_to_history(entry)
 
     # Update historical "last_session" proof metadata persistently
     ls = current.get("last_session")
@@ -167,7 +279,7 @@ def update_session_status(
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
         with open(STATUS_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2)
-        logger.info(f"SessionStatus: Updated connection status to {status} (screenshot: {screenshot})")
+        logger.info(f"SessionStatus: Updated connection status to {status} (screenshot: {screenshot}, latest_event: {latest_event}, latest_screenshot: {current['latest_screenshot']})")
     except Exception as e:
         logger.error(f"SessionStatus: Failed to persist session status to disk: {e}")
 

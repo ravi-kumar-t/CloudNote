@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
 from app.database import get_db_connection, init_db
@@ -18,8 +18,30 @@ from app.database import get_db_connection, init_db
 # Ensure SQLite schema initialized on server start
 init_db()
 
-# Ensure screenshots directory exists to prevent FastAPI mount failures
-os.makedirs("screenshots", exist_ok=True)
+# Ensure screenshots directory exists absolutely relative to __file__ to prevent FastAPI mount failures
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+screenshots_dir = os.path.abspath(os.path.join(backend_dir, "..", "screenshots"))
+os.makedirs(screenshots_dir, exist_ok=True)
+
+# Auto-bootstrap missing logs directory and JSON files on backend startup
+logs_dir = os.path.abspath(os.path.join(backend_dir, "..", "logs"))
+os.makedirs(logs_dir, exist_ok=True)
+
+status_file_path = os.path.join(logs_dir, "session_status.json")
+if not os.path.exists(status_file_path) or os.path.getsize(status_file_path) == 0:
+    try:
+        with open(status_file_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+    except Exception:
+        pass
+
+history_file_path = os.path.join(logs_dir, "class_history.json")
+if not os.path.exists(history_file_path) or os.path.getsize(history_file_path) == 0:
+    try:
+        with open(history_file_path, "w", encoding="utf-8") as f:
+            json.dump([], f)
+    except Exception:
+        pass
 
 # Prometheus Observability Metrics (Sidecar Integration)
 REQUEST_COUNT = Counter(
@@ -42,8 +64,93 @@ INGESTION_LOOP_STATUS = Gauge(
 
 app = FastAPI(title="CloudNote API", version="1.0.0")
 
-# Mount static screenshots directory
-app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshots")
+@app.get("/debug-meeting", response_class=HTMLResponse)
+def get_debug_meeting():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Debug Meeting Classroom</title>
+        <style>
+            body { font-family: Arial, sans-serif; background: #0f111a; color: #fff; padding: 40px; text-align: center; }
+            .btn { background: #a855f7; border: none; color: white; padding: 15px 32px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer; border-radius: 8px; font-weight: bold; }
+            iframe { border: 2px solid #a855f7; border-radius: 12px; margin-top: 30px; width: 80%; height: 400px; background: #1e1e2e; }
+        </style>
+    </head>
+    <body>
+        <h1>Welcome to the CloudNote Debug Classroom</h1>
+        <p>This is a simulated successful join pipeline endpoint.</p>
+        <button class="joinBtn btn" id="join-btn" onclick="showIframe()">Join Live Class</button>
+        <br>
+        <iframe id="bbb-iframe" src="/debug-iframe" style="display:none;"></iframe>
+        <script>
+            function showIframe() {
+                document.getElementById('bbb-iframe').style.display = 'inline-block';
+                document.getElementById('join-btn').style.background = '#475569';
+                document.getElementById('join-btn').innerText = 'Joined';
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+@app.get("/debug-iframe", response_class=HTMLResponse)
+def get_debug_iframe():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Debug Meeting Iframe</title>
+        <style>
+            body { font-family: Arial, sans-serif; background: #1e1e2e; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+            .btn { background: #10b981; border: none; color: white; padding: 12px 24px; font-size: 14px; margin: 10px; cursor: pointer; border-radius: 6px; font-weight: bold; }
+            .echo-btn { background: #f59e0b; display: none; }
+        </style>
+    </head>
+    <body>
+        <h3>BigBlueButton Meeting Room</h3>
+        <button aria-label="Microphone" class="btn" id="mic-btn" onclick="enableEcho()">Microphone</button>
+        <button aria-label="Echo is audible" class="btn echo-btn" id="echo-btn" onclick="confirmAudio()">Echo is audible (Yes)</button>
+        <div id="status" style="margin-top: 15px; color: #10b981; font-weight: bold;"></div>
+        <script>
+            function enableEcho() {
+                document.getElementById('mic-btn').style.background = '#475569';
+                document.getElementById('echo-btn').style.display = 'inline-block';
+                document.getElementById('status').innerText = 'Microphone activated. Audio joining...';
+            }
+            function confirmAudio() {
+                document.getElementById('echo-btn').style.background = '#475569';
+                document.getElementById('status').innerText = 'Audio connected successfully. Class Joined!';
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+@app.get("/debug-meeting-fail", response_class=HTMLResponse)
+def get_debug_meeting_fail():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Debug Meeting Classroom (Failure Mode)</title>
+        <style>
+            body { font-family: Arial, sans-serif; background: #1a0f0f; color: #fff; padding: 40px; text-align: center; }
+            .error-box { border: 2px solid #ef4444; border-radius: 12px; background: #2d1616; padding: 30px; display: inline-block; max-width: 500px; margin-top: 50px; }
+        </style>
+    </head>
+    <body>
+        <h1>CloudNote Debug Classroom (Failure Mode)</h1>
+        <div class="error-box">
+            <h2>⚠️ Class Connection Lost</h2>
+            <p>The classroom session has terminated or the join window has expired. No Join button is available.</p>
+        </div>
+    </body>
+    </html>
+    """
+
+# Mount static screenshots directory using absolute path resolution
+app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
 
 # Enable CORS for React dashboard access
 app.add_middleware(
@@ -286,6 +393,25 @@ def get_session_status_api(current_user: dict = Depends(get_current_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load session status metadata: {e}"
         )
+
+# Persistent class history endpoint for visual dashboard
+@app.get("/api/class-history")
+def get_class_history(current_user: dict = Depends(get_current_user)):
+    """Retrieves persistent class attendance history sorted newest first."""
+    history_file = "logs/class_history.json"
+    if not os.path.exists(history_file):
+        return []
+    if os.path.getsize(history_file) == 0:
+        return []
+    try:
+        with open(history_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            # Return newest first
+            return list(reversed(data))
+        return []
+    except Exception:
+        return []
 
 # Get cached timetable endpoint
 @app.get("/api/timetable")

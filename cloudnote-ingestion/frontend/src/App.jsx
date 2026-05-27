@@ -61,6 +61,7 @@ function App() {
   const [timetable, setTimetable] = useState([]);
   const [sessionStatus, setSessionStatus] = useState(null);
   const [modalScreenshot, setModalScreenshot] = useState(null);
+  const [classHistory, setClassHistory] = useState([]);
 
   const handleImageError = (e) => {
     e.target.onerror = null;
@@ -234,16 +235,35 @@ function App() {
     }
   };
 
-  // Poll Ingestion Status & Timetable
+  // Fetch Persistent Class Attendance History
+  const fetchClassHistory = async (authToken) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/class-history`, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setClassHistory(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch class history:', err);
+    }
+  };
+
+  // Poll Ingestion Status, Timetable & Class History
   useEffect(() => {
     if (token) {
       fetchIngestionStatus(token);
       fetchSessionStatus(token);
       fetchTimetable(token);
+      fetchClassHistory(token);
       const interval = setInterval(() => {
         fetchIngestionStatus(token);
         fetchSessionStatus(token);
         fetchTimetable(token);
+        fetchClassHistory(token);
       }, 10000);
       return () => clearInterval(interval);
     }
@@ -408,6 +428,18 @@ function App() {
                               </span>
                             </>
                           );
+                        case 'FACULTY_NOT_STARTED':
+                          return (
+                            <>
+                              <span className="status-indicator recovering" style={{color: '#eab308'}}>
+                                <span className="pulse-circle recovering" style={{backgroundColor: '#eab308'}}></span>
+                                🟡 Faculty Did Not Start Class
+                              </span>
+                              <span className="status-time-lbl">
+                                Faculty has not started the lecture session.
+                              </span>
+                            </>
+                          );
                         case 'DISCONNECTED':
                           return (
                             <>
@@ -461,33 +493,12 @@ function App() {
                   <span className="status-timestamp">Last Active: {formatTimestamp(ingestionStatus.timestamp)}</span>
                 </div>
               </div>
-
-              {sessionStatus.status !== 'IDLE' && sessionStatus.screenshot && (
-                <div className="active-screenshot-preview">
-                  <span className="screenshot-title text-purple-accent">
-                    {sessionStatus.status === 'CONNECTED' ? '🟢 Connection Proof' :
-                     sessionStatus.status === 'FAILED' ? '❌ Failure Proof' : '🔴 Disconnect Proof'}
-                  </span>
-                  <div className="screenshot-wrapper active-proof" onClick={() => setModalScreenshot({
-                    title: sessionStatus.status === 'CONNECTED' ? '🟢 Join Success Validation Screenshot' :
-                           sessionStatus.status === 'FAILED' ? '❌ Join Failure Validation Screenshot' : '🔴 Disconnect Validation Screenshot',
-                    meta: `Timestamp: ${formatTimestamp(sessionStatus.status === 'CONNECTED' ? sessionStatus.last_join_time : sessionStatus.disconnect_time || sessionStatus.last_join_time)}`,
-                    src: `${API_BASE}/screenshots/${sessionStatus.screenshot}`
-                  })}>
-                    <img 
-                      src={`${API_BASE}/screenshots/${sessionStatus.screenshot}`} 
-                      alt="Active Validation Proof"
-                      onError={handleImageError}
-                    />
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
-          {/* Timetable Monitor Widget */}
+          {/* 1. Today's Class Schedule (Pinned at the Top) */}
           {dashboardError && <div className="auth-error">{dashboardError}</div>}
-          <div className="timetable-section glass-panel">
+          <div className="timetable-section glass-panel" style={{ marginBottom: '20px' }}>
             <div className="timetable-header">
               <div className="timetable-title">
                 <Calendar size={22} color="#a855f7" />
@@ -519,6 +530,241 @@ function App() {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* 2. Current Active Class (Only visible when active, visually larger than history cards) */}
+          {sessionStatus && sessionStatus.status !== 'IDLE' && (
+            <div className="current-class-section glass-panel" style={{ marginTop: '20px', padding: '25px', borderLeft: '4px solid #a855f7' }}>
+              <div className="section-title-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                <h2 style={{ margin: 0, fontSize: '1.4rem', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <BookOpen size={24} color="#a855f7" />
+                  Current Active Class
+                </h2>
+                {(() => {
+                  const status = sessionStatus.status || 'IDLE';
+                  let color = '#a855f7';
+                  if (status === 'CONNECTED') color = '#10b981';
+                  else if (status === 'FAILED') color = '#ef4444';
+                  else if (status === 'DISCONNECTED') color = '#eab308';
+                  else if (status === 'CONNECTING') color = '#3b82f6';
+                  else if (status === 'FACULTY_NOT_STARTED') color = '#eab308';
+                  return (
+                    <span className="badge animate-pulse" style={{
+                      backgroundColor: `${color}15`,
+                      color: color,
+                      border: `1px solid ${color}30`,
+                      padding: '8px 16px',
+                      borderRadius: '20px',
+                      fontWeight: 'bold',
+                      textTransform: 'uppercase',
+                      fontSize: '0.85rem'
+                    }}>
+                      {status}
+                    </span>
+                  );
+                })()}
+              </div>
+
+              <div className="current-class-details-grid" style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: '20px',
+                marginBottom: '20px',
+                padding: '15px',
+                borderRadius: '10px',
+                background: 'rgba(255, 255, 255, 0.02)'
+              }}>
+                <div>
+                  <span style={{ fontSize: '0.85rem', color: '#64748b', display: 'block' }}>Subject</span>
+                  <strong style={{ fontSize: '1.1rem', color: '#fff' }}>{sessionStatus.subject || sessionStatus.subject_code || 'N/A'}</strong>
+                </div>
+                <div>
+                  <span style={{ fontSize: '0.85rem', color: '#64748b', display: 'block' }}>Instructor</span>
+                  <strong style={{ fontSize: '1.1rem', color: '#fff' }}>{sessionStatus.instructor || 'N/A'}</strong>
+                </div>
+                {sessionStatus.title && (
+                  <div>
+                    <span style={{ fontSize: '0.85rem', color: '#64748b', display: 'block' }}>Topic</span>
+                    <strong style={{ fontSize: '1.1rem', color: '#fff' }}>{sessionStatus.title}</strong>
+                  </div>
+                )}
+                <div>
+                  <span style={{ fontSize: '0.85rem', color: '#64748b', display: 'block' }}>Joined Timestamp</span>
+                  <strong style={{ fontSize: '1.1rem', color: '#fff' }}>{formatTimestamp(sessionStatus.joined_at || sessionStatus.last_join_time)}</strong>
+                </div>
+              </div>
+
+              {(sessionStatus.latest_screenshot || sessionStatus.screenshot) && (
+                <div className="current-class-screenshot-area">
+                  <div className="screenshot-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                    <span style={{ fontSize: '0.9rem', color: '#a855f7', fontWeight: 'bold' }}>Latest Live Screenshot Proof</span>
+                    <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Last Event: {sessionStatus.latest_event || 'N/A'}</span>
+                  </div>
+                  <div className="screenshot-wrapper active-proof" style={{
+                    cursor: 'pointer',
+                    borderRadius: '12px',
+                    overflow: 'hidden',
+                    border: '2px solid rgba(168, 85, 247, 0.2)',
+                    maxHeight: '480px',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    background: '#0f111a'
+                  }}
+                  onClick={() => setModalScreenshot({
+                    title: `Live Validation Screenshot [${sessionStatus.status}]`,
+                    meta: `Subject: ${sessionStatus.subject} | Time: ${formatTimestamp(sessionStatus.timestamp)}`,
+                    src: sessionStatus.latest_screenshot 
+                      ? `${API_BASE}${sessionStatus.latest_screenshot}` 
+                      : `${API_BASE}/screenshots/${sessionStatus.screenshot}`
+                  })}>
+                    <img 
+                      src={sessionStatus.latest_screenshot 
+                        ? `${API_BASE}${sessionStatus.latest_screenshot}` 
+                        : `${API_BASE}/screenshots/${sessionStatus.screenshot}`} 
+                      alt="Live Attendance Proof"
+                      onError={handleImageError}
+                      style={{ maxWidth: '100%', maxHeight: '450px', objectFit: 'contain' }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3. Previously Joined Classes (Rendered LAST with internal scrolling) */}
+          <div className="previously-joined-section glass-panel" style={{ marginTop: '30px', padding: '25px' }}>
+            <h2 style={{ fontSize: '1.4rem', color: '#fff', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <ListChecks size={24} color="#a855f7" />
+              Previously Joined Classes
+            </h2>
+
+            <div className="scrollable-history-container" style={{ 
+              maxHeight: '500px', 
+              overflowY: 'auto', 
+              paddingRight: '10px' 
+            }}>
+              {classHistory.length === 0 ? (
+                <div className="history-empty" style={{ textAlign: 'center', padding: '30px 10px', color: '#64748b' }}>
+                  <HelpCircle size={40} style={{ marginBottom: '10px', color: '#a855f7', opacity: 0.6 }} />
+                  <p style={{ margin: 0, fontSize: '1.1rem' }}>No completed attendance history yet.</p>
+                  <p style={{ margin: '5px 0 0', fontSize: '0.9rem', opacity: 0.8 }}>Ingested classes will automatically populate here upon completion.</p>
+                </div>
+              ) : (
+                <div className="history-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  {classHistory.map((item, index) => (
+                    <div key={index} className="history-item-card glass-panel" style={{
+                      padding: '20px',
+                      borderLeft: `4px solid ${item.status === 'CONNECTED' ? '#10b981' : item.status === 'FACULTY_NOT_STARTED' ? '#eab308' : '#ef4444'}`,
+                      background: 'rgba(255, 255, 255, 0.01)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '15px'
+                    }}>
+                      <div className="history-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '10px' }}>
+                        <div>
+                          <span style={{ fontSize: '0.8rem', color: '#a855f7', fontWeight: 'bold', textTransform: 'uppercase' }}>[{item.subject}]</span>
+                          <h3 style={{ margin: '2px 0 0', fontSize: '1.15rem', color: '#fff' }}>{item.title || 'Specialization Lecture'}</h3>
+                          <p style={{ margin: '2px 0 0', fontSize: '0.85rem', color: '#64748b' }}>Instructor: {item.instructor || 'N/A'}</p>
+                        </div>
+                        
+                        <span className="badge" style={{
+                          backgroundColor: `${item.status === 'CONNECTED' ? '#10b981' : item.status === 'FACULTY_NOT_STARTED' ? '#eab308' : '#ef4444'}15`,
+                          color: item.status === 'CONNECTED' ? '#10b981' : item.status === 'FACULTY_NOT_STARTED' ? '#eab308' : '#ef4444',
+                          border: `1px solid ${item.status === 'CONNECTED' ? '#10b981' : item.status === 'FACULTY_NOT_STARTED' ? '#eab308' : '#ef4444'}30`,
+                          padding: '4px 10px',
+                          borderRadius: '20px',
+                          fontWeight: 'bold',
+                          fontSize: '0.75rem',
+                          textTransform: 'uppercase'
+                        }}>
+                          {item.status}
+                        </span>
+                      </div>
+
+                      <div className="history-card-times" style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                        gap: '15px',
+                        fontSize: '0.85rem',
+                        color: '#94a3b8',
+                        borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+                        borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                        padding: '10px 0'
+                      }}>
+                        <div>
+                          Joined Class: <strong style={{ color: '#fff' }}>{formatTimestamp(item.joined_at)}</strong>
+                        </div>
+                        <div>
+                          Ended Class: <strong style={{ color: '#fff' }}>{formatTimestamp(item.disconnected_at || item.ended_at)}</strong>
+                        </div>
+                      </div>
+
+                      {(() => {
+                        // Extract and support both flat (top-level) and nested screenshot keys dynamically
+                        const screenshots = {};
+                        if (item.screenshots) {
+                          if (item.screenshots.connected) screenshots.connected = item.screenshots.connected;
+                          if (item.screenshots.disconnect) screenshots.disconnect = item.screenshots.disconnect;
+                          if (item.screenshots.failure) screenshots.failure = item.screenshots.failure;
+                        }
+                        if (item.latest_screenshot) {
+                          if (item.status === 'FAILED') {
+                            screenshots.failure = item.latest_screenshot;
+                          } else {
+                            screenshots.connected = item.latest_screenshot;
+                          }
+                        }
+                        if (item.disconnect_screenshot) {
+                          screenshots.disconnect = item.disconnect_screenshot;
+                        }
+
+                        if (Object.keys(screenshots).length === 0) return null;
+
+                        return (
+                          <div className="history-card-thumbnails">
+                            <span style={{ fontSize: '0.8rem', color: '#64748b', display: 'block', marginBottom: '8px' }}>Attendance Proof Screenshots:</span>
+                            <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap' }}>
+                              {Object.entries(screenshots).map(([type, url]) => {
+                                if (!url) return null;
+                                return (
+                                  <div key={type} className="thumbnail-wrapper" style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    <span style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'capitalize' }}>{type}</span>
+                                    <div className="screenshot-wrapper" style={{
+                                      width: '120px',
+                                      height: '80px',
+                                      borderRadius: '8px',
+                                      overflow: 'hidden',
+                                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                                      cursor: 'pointer',
+                                      background: '#0f111a',
+                                      display: 'flex',
+                                      justifyContent: 'center',
+                                      alignItems: 'center'
+                                    }}
+                                    onClick={() => setModalScreenshot({
+                                      title: `${item.subject} - ${type.toUpperCase()} Proof`,
+                                      meta: `Ended: ${formatTimestamp(item.disconnected_at || item.ended_at)}`,
+                                      src: `${API_BASE}${url}`
+                                    })}>
+                                      <img 
+                                        src={`${API_BASE}${url}`} 
+                                        alt={`${type} thumbnail`}
+                                        onError={handleImageError}
+                                        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'cover' }}
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
 

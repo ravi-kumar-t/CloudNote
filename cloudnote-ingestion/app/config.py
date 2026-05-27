@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Testing/Debug
     DEBUG_SLEEP_OVERRIDE_SECONDS: Optional[int] = None
     DEBUG_MODE: bool = False
+    DEBUG_SIMULATION_MODE: str = "SUCCESS"
+    DEMO_MODE: bool = False
+    BACKEND_INTERNAL_URL: str = "http://backend:8000"
     
     # Gemini AI & Extraction Settings
     GEMINI_API_KEY: Optional[str] = None
@@ -43,3 +46,9 @@ settings = Settings()
 # Ensure directories exist
 os.makedirs(settings.LOGS_DIR, exist_ok=True)
 os.makedirs(settings.SCREENSHOTS_DIR, exist_ok=True)
+
+def get_screenshot_path(filename: str) -> str:
+    """Returns absolute path to screenshot folder inside docker context (/app/screenshots) or local workspace fallback."""
+    if os.path.exists("/app"):
+        return f"/app/screenshots/{filename}"
+    return os.path.abspath(os.path.join(settings.SCREENSHOTS_DIR, filename))

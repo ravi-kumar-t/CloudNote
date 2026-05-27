@@ -21,7 +21,7 @@ async def open_calendar(page: Page):
         await view_meetings.click()
 
         # Allow dynamic calendar render
-        await page.wait_for_timeout(10000)
+        await page.wait_for_timeout(3000)
 
         logger.info(f"DEBUG URL AFTER NAV: {page.url}")
 
@@ -165,8 +165,8 @@ async def select_latest_event(page: Page):
         logger.error(f"Failed to click the lecture card: {click_err}")
         raise
     
-    # Stabilization delay (shorter in production)
-    await page.wait_for_timeout(1000 if not settings.DEBUG_MODE else 3000)
+    # Stabilization delay
+    await page.wait_for_timeout(500)
     
     if settings.DEBUG_MODE:
         screenshot_post_click = os.path.join(settings.SCREENSHOTS_DIR, "post_click_modal.png")
@@ -287,19 +287,10 @@ async def analyze_lecture_state(page: Page) -> str:
     logger.info("Analyzing lecture page state...")
     
     # Wait a bit for the lecture page to fully render
-    await page.wait_for_load_state("networkidle")
-    await page.wait_for_timeout(1000 if not settings.DEBUG_MODE else 3000)
+    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_timeout(500)
     
-    # 1. Fast Path check for JOINABLE_ACTIVE (production mode only)
-    if not settings.DEBUG_MODE:
-        try:
-            join_btn = page.locator("button:has-text('Join'), a.joinBtn, a[href*='jnr.jsp'], [class*='joinbtn']").first
-            if await join_btn.is_visible() and not await join_btn.is_disabled():
-                logger.info("[FAST PATH] Confidently detected visible active Join button. Skipping diagnostic overhead.")
-                return {"state": "JOINABLE_ACTIVE", "wait_time": 300}
-        except Exception as fast_err:
-            logger.debug(f"Fast path check skipped: {fast_err}")
-            
+
     # 2. Save lecture_page.html and lecture_state_snapshot.png (DEBUG ONLY)
     if settings.DEBUG_MODE:
         if not os.path.exists(settings.SCREENSHOTS_DIR):
@@ -503,50 +494,51 @@ async def analyze_lecture_state(page: Page) -> str:
 
     state = "UNKNOWN"
     
-    # Priority 1: JOINABLE_ACTIVE (visible enabled Join button / jnr.jsp / joinBtn / clickable)
-    join_btn_found = False
-    for item in visible_interactive:
-        text_match = "join" in item["text"].lower()
-        href_match = "jnr.jsp" in item.get("href", "").lower()
-        class_match = "joinbtn" in item.get("class", "").lower()
-        aria_match = "join" in item.get("aria", "").lower()
-        
-        if (text_match or href_match or class_match or aria_match) and not item["disabled"]:
-            join_btn_found = True
-            logger.info(f"Priority 1 Match - Active Join button found: Text='{item['text']}', Href='{item.get('href')}', Class='{item.get('class')}'")
-            break
-            
-    if join_btn_found:
-        state = "JOINABLE_ACTIVE"
-    # Priority 2: NOT_STARTED (explicit "Not started yet" content match, taking high precedence)
-    elif not_started_match:
-        state = "NOT_STARTED"
-        logger.info(f"Priority 2 Match - 'Not Started' text detected inside content element:")
+    # Priority 1: FACULTY_NOT_STARTED (explicit "Not started yet" content match, taking highest precedence even over join button)
+    if not_started_match:
+        state = "FACULTY_NOT_STARTED"
+        logger.info(f"Priority 1 Match - 'Not Started' text detected inside content element:")
         logger.info(f"  Matched selector/tag: {not_started_match['tag']}")
         logger.info(f"  Matched text: '{not_started_match['text']}'")
         logger.info(f"  Matched DOM node details: ID='{not_started_match['id']}', Classes='{not_started_match['classes']}'")
         logger.info(f"  Matched container path: {not_started_match['path']}")
-    # Priority 3: UPCOMING (countdown timer exists, NO active Join button exists)
-    elif has_countdown:
-        state = "UPCOMING"
-        logger.info(f"Priority 3 Match - Countdown timer found on the page.")
-    # Priority 4: NOT_YET_AVAILABLE (explicit "Join not available" inside core content area)
-    elif join_not_avail_match:
-        state = "NOT_YET_AVAILABLE"
-        logger.info(f"Priority 4 Match - 'Join Not Available' text detected inside content element:")
-        logger.info(f"  Matched selector/tag: {join_not_avail_match['tag']}")
-        logger.info(f"  Matched text: '{join_not_avail_match['text']}'")
-        logger.info(f"  Matched container path: {join_not_avail_match['path']}")
-    # Priority 5: COMPLETED (completed or ended inside core content area)
-    elif completed_match:
-        state = "COMPLETED"
-        logger.info(f"Priority 5 Match - 'Completed/Ended' text detected inside content element:")
-        logger.info(f"  Matched selector/tag: {completed_match['tag']}")
-        logger.info(f"  Matched text: '{completed_match['text']}'")
-        logger.info(f"  Matched DOM node details: ID='{completed_match['id']}', Classes='{completed_match['classes']}'")
-        logger.info(f"  Matched container path: {completed_match['path']}")
     else:
-        state = "UNKNOWN"
+        # Priority 2: JOINABLE_ACTIVE (visible enabled Join button / jnr.jsp / joinBtn / clickable)
+        join_btn_found = False
+        for item in visible_interactive:
+            text_match = "join" in item["text"].lower()
+            href_match = "jnr.jsp" in item.get("href", "").lower()
+            class_match = "joinbtn" in item.get("class", "").lower()
+            aria_match = "join" in item.get("aria", "").lower()
+            
+            if (text_match or href_match or class_match or aria_match) and not item["disabled"]:
+                join_btn_found = True
+                logger.info(f"Priority 2 Match - Active Join button found: Text='{item['text']}', Href='{item.get('href')}', Class='{item.get('class')}'")
+                break
+                
+        if join_btn_found:
+            state = "JOINABLE_ACTIVE"
+        # Priority 3: UPCOMING (countdown timer exists, NO active Join button exists)
+        elif has_countdown:
+            state = "UPCOMING"
+            logger.info(f"Priority 3 Match - Countdown timer found on the page.")
+        # Priority 4: NOT_YET_AVAILABLE (explicit "Join not available" inside core content area)
+        elif join_not_avail_match:
+            state = "NOT_YET_AVAILABLE"
+            logger.info(f"Priority 4 Match - 'Join Not Available' text detected inside content element:")
+            logger.info(f"  Matched selector/tag: {join_not_avail_match['tag']}")
+            logger.info(f"  Matched text: '{join_not_avail_match['text']}'")
+            logger.info(f"  Matched container path: {join_not_avail_match['path']}")
+        # Priority 5: COMPLETED (completed or ended inside core content area)
+        elif completed_match:
+            state = "COMPLETED"
+            logger.info(f"Priority 5 Match - 'Completed/Ended' text detected inside content element:")
+            logger.info(f"  Matched selector/tag: {completed_match['tag']}")
+            logger.info(f"  Matched text: '{completed_match['text']}'")
+            logger.info(f"  Matched DOM node details: ID='{completed_match['id']}', Classes='{completed_match['classes']}'")
+            logger.info(f"  Matched container path: {completed_match['path']}")
+        else:
+            state = "UNKNOWN"
 
     # Save diagnostic artifacts if COMPLETED is detected to allow false positive inspections
     if state == "COMPLETED":
@@ -610,14 +602,14 @@ async def join_class_pipeline(page: Page, join_url: str = None):
                 wait_until="commit",
                 timeout=180000
             )
-            await page.wait_for_timeout(15000)
+            await page.wait_for_timeout(3000)
             logger.info(f"PLAYWRIGHT URL AFTER GOTO: {page.url}")
             logger.info(f"PLAYWRIGHT TITLE: {await page.title()}")
             logger.info(f"[JOIN_PHASE] Navigation complete. Final page URL: {page.url}")
             
             # Wait for content container
             try:
-                await page.wait_for_selector(".ui-dialog-content, .modal-content, #main-content, main, #content", timeout=15000)
+                await page.wait_for_selector(".ui-dialog-content, .modal-content, #main-content, main, #content", timeout=3000)
                 logger.info("[JOIN_PHASE] Lecture content container loaded successfully.")
             except Exception as wait_err:
                 logger.warning(f"[JOIN_PHASE] Warning: Lecture container load wait timed out: {wait_err}")
@@ -626,16 +618,7 @@ async def join_class_pipeline(page: Page, join_url: str = None):
             # after select_latest_event has been executed. No need to reload calendar or search events here.
             logger.info("[JOIN_PHASE] No explicit join_url provided. Proceeding with current page state...")
         
-        # ==========================================
-        # [ULTRA FAST PATH] Production Instant-Click
-        # ==========================================
-        if "mi.jsp" in page.url:
-            join_btn = page.locator("button:has-text('Join'), a.joinBtn, a[href*='jnr.jsp'], [class*='joinbtn']").first
-            if await join_btn.count() > 0 and await join_btn.is_visible() and not await join_btn.is_disabled():
-                logger.info("[ULTRA FAST PATH] Active, enabled Join button detected on lecture page. Joining immediately...")
-                await join_btn.click()
-                await handle_meeting_room(page)
-                return True
+
         
         had_upcoming = False
         max_iterations = 20
@@ -667,14 +650,7 @@ async def join_class_pipeline(page: Page, join_url: str = None):
                         await page.reload()
                         await page.wait_for_load_state("networkidle")
                         
-                        # [POLLING ULTRA FAST PATH]
-                        if "mi.jsp" in page.url:
-                            join_btn = page.locator("button:has-text('Join'), a.joinBtn, a[href*='jnr.jsp'], [class*='joinbtn']").first
-                            if await join_btn.count() > 0 and await join_btn.is_visible() and not await join_btn.is_disabled():
-                                logger.info("[POLLING ULTRA FAST PATH] Active Join button detected. Joining immediately...")
-                                await join_btn.click()
-                                await handle_meeting_room(page)
-                                return True
+
                         
                         # Fallback recovery: if we somehow got redirected away from the lecture page
                         if "mi.jsp" not in page.url:
@@ -700,7 +676,29 @@ async def join_class_pipeline(page: Page, join_url: str = None):
                 logger.warning("Pre-join polling timed out after 10 minutes without finding Join button.")
                 return False
  
-            if lecture_state == "JOINABLE_ACTIVE":
+            if lecture_state == "FACULTY_NOT_STARTED":
+                logger.info("Lecture is FACULTY_NOT_STARTED. Saving screenshot and terminating pipeline...")
+                from .utils import get_now_ist
+                from .config import get_screenshot_path
+                import time
+                timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                ss_filename = f"not_started_{timestamp}.png"
+                ss_path = get_screenshot_path(ss_filename)
+                
+                try:
+                    await page.screenshot(path=ss_path, full_page=True)
+                    from .session_status import update_session_status
+                    update_session_status(
+                        status="FACULTY_NOT_STARTED",
+                        screenshot=ss_filename,
+                        disconnect_time=None
+                    )
+                except Exception as ss_err:
+                    logger.error(f"Failed to capture FACULTY_NOT_STARTED screenshot: {ss_err}")
+                
+                return "FACULTY_NOT_STARTED"
+                
+            elif lecture_state == "JOINABLE_ACTIVE":
                 logger.info("Lecture is JOINABLE_ACTIVE. Proceeding to join sequence...")
                 # Handle countdown if present (though unlikely if JOINABLE_ACTIVE, kept for safety)
                 await wait_for_countdown(page, CalendarSelectors.COUNTDOWN_TEXT)

@@ -2,43 +2,19 @@ import asyncio
 import os
 import json
 from playwright.async_api import async_playwright
-from .config import settings
+from .config import settings, get_screenshot_path
 from .logger import logger
 from datetime import datetime, timezone, timedelta, date, time
 import sys
 from .extractor import LectureExtractor
-
-def get_now_ist() -> datetime:
-    """Returns the current timezone-naive datetime representing India Standard Time (UTC+5:30)."""
-    return datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(tzinfo=None)
-
+from .utils import get_now_ist
 async def create_browser_and_page(p):
     """Launches browser, context, and page with settings-defined defaults and microphone permissions."""
     logger.info("Launching browser...")
+    logger.info(f"PLAYWRIGHT HEADLESS MODE: {settings.HEADLESS}")
     browser = await p.chromium.launch(
         headless=settings.HEADLESS,
-        args=[
-            "--use-fake-ui-for-media-stream", 
-            "--use-fake-device-for-media-stream",
-            "--ignore-certificate-errors",
-            "--ignore-ssl-errors",
-            "--allow-running-insecure-content",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-software-rasterizer",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-dev-tools",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            "--disable-renderer-backgrounding",
-            "--disable-background-timer-throttling",
-            "--disable-ipc-flooding-protection",
-            "--disable-features=site-per-process",
-            "--no-sandbox"
-        ]
+        args=["--start-maximized"]
     )
     
     # Create a browser context with permissions for microphone
@@ -278,8 +254,13 @@ async def run_ingestion():
     from .timetable_parser import parse_class_times
     from .login import perform_login
     
-    join_attempts_limit = 3
-    join_failure_cooldown = 180  # 3 minutes cooldown if join/login fails
+    if not settings.DEBUG_MODE:
+        if any(c.get("subject_code", "").startswith("DEBUG_") for c in timetable_cache.classes):
+            logger.info("Found debug data in timetable cache. Wiping cache for REAL MODE.")
+            timetable_cache.mark_stale()
+
+    join_attempts_limit = 3 if not settings.DEBUG_MODE else 1
+    join_failure_cooldown = 180 if not settings.DEBUG_MODE else 1
     
     while True:
         # Resilient scheduler heartbeat update (Sidecar Integration)
@@ -289,15 +270,38 @@ async def run_ingestion():
         except Exception:
             pass
         # Check cache state
-        classes = timetable_cache.get_timetable()
-        from datetime import timezone, timedelta
-        IST = timezone(timedelta(hours=5, minutes=30))
-        today_str = datetime.now(IST).strftime("%Y-%m-%d")
-        cache_valid = (
-            timetable_cache.last_fetch_date == today_str
-            and len(classes) > 0
-        )
-        sync_requested = timetable_cache.is_sync_requested()
+        if settings.DEBUG_MODE:
+            logger.info("=== DEBUG_MODE SIMULATION ACTIVE ===")
+            now = get_now_ist()
+            if settings.DEBUG_SIMULATION_MODE.upper() == "FAILURE":
+                join_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting-fail"
+                subject = "DEBUG_FAIL"
+            else:
+                join_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting"
+                subject = "DEBUG_SUCCESS"
+                
+            active_class = {
+                "subject_code": subject,
+                "subject_name": "Debug Automation Class",
+                "faculty": "Dr. Playwright Tester",
+                "timings": "10:00 AM - 11:00 AM",
+                "start_time": (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "end_time": (now + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
+                "join_url": join_url,
+                "status": "UPCOMING"
+            }
+            classes = [active_class]
+            cache_valid = True
+            sync_requested = False
+        else:
+            classes = timetable_cache.get_timetable()
+            IST = timezone(timedelta(hours=5, minutes=30))
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            cache_valid = (
+                timetable_cache.last_fetch_date == today_str
+                and len(classes) > 0
+            )
+            sync_requested = timetable_cache.is_sync_requested()
         
         logger.info(f"DEBUG CACHE CLASS COUNT: {len(classes)}")
         logger.info(f"DEBUG CACHE VALID: {cache_valid}")
@@ -312,28 +316,10 @@ async def run_ingestion():
             
             async with async_playwright() as p:
                 logger.info("Unified Loop: Launching headless browser for sync session...")
+                logger.info(f"PLAYWRIGHT HEADLESS MODE: {settings.HEADLESS}")
                 browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--ignore-certificate-errors",
-                        "--ignore-ssl-errors",
-                        "--allow-running-insecure-content",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-software-rasterizer",
-                        "--disable-extensions",
-                        "--disable-background-networking",
-                        "--disable-sync",
-                        "--disable-dev-tools",
-                        "--no-first-run",
-                        "--disable-default-apps",
-                        "--disable-popup-blocking",
-                        "--disable-renderer-backgrounding",
-                        "--disable-background-timer-throttling",
-                        "--disable-ipc-flooding-protection",
-                        "--disable-features=site-per-process",
-                        "--no-sandbox"
-                    ]
+                    headless=settings.HEADLESS,
+                    args=["--start-maximized"]
                 )
                 context = await browser.new_context(
                     ignore_https_errors=True,
@@ -383,9 +369,19 @@ async def run_ingestion():
             except Exception:
                 continue
             
-            # Case 1: Active class (currently between start and end times)
+            logger.info(f"DEBUG CURRENT IST TIME: {now}")
+            logger.info(f"DEBUG CLASS START: {start_dt}")
+            logger.info(f"DEBUG CLASS END: {end_dt}")
+            logger.info(f"DEBUG CLASS STATUS: {c}")
+            
+            should_join = False
             if start_dt <= now <= end_dt:
-                # Skip if already completed (though normally handled by loop exit)
+                should_join = True
+            elif settings.DEBUG_MODE:
+                logger.info("DEBUG_MODE active: Bypassing scheduler gating to force join flow.")
+                should_join = True
+                
+            if should_join:
                 if c.get("status") != "COMPLETED":
                     active_class = c
                     break
@@ -399,6 +395,32 @@ async def run_ingestion():
                     
         # Decision Orchestrator
         if active_class:
+            if settings.DEMO_MODE:
+                logger.info("DEMO_MODE active: Waiting 15 seconds for backend to stabilize inside Docker network...")
+                await asyncio.sleep(15)
+
+            if settings.DEBUG_MODE:
+                logger.info(f"DEBUG BACKEND URL: {settings.BACKEND_INTERNAL_URL}")
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        test_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting"
+                        async with session.get(test_url, timeout=10) as resp:
+                            if resp.status == 200:
+                                logger.info(f"Backend connectivity verification SUCCESS against {test_url}")
+                            else:
+                                logger.error(f"Backend connectivity verification FAILED. Status: {resp.status}")
+                                if settings.DEMO_MODE:
+                                    logger.info("=== DEMO_MODE ABORTING DUE TO BACKEND UNAVAILABILITY ===")
+                                    while True:
+                                        await asyncio.sleep(3600)
+                except Exception as conn_err:
+                    logger.error(f"Backend connectivity verification FAILED with exception: {conn_err}")
+                    if settings.DEMO_MODE:
+                        logger.info("=== DEMO_MODE ABORTING DUE TO BACKEND UNAVAILABILITY ===")
+                        while True:
+                            await asyncio.sleep(3600)
+
             # We have an active class! Launch browser and execute targeted join & monitor session
             subject = active_class.get("subject_code", "Lecture")
             end_str = active_class.get("end_time")
@@ -410,10 +432,15 @@ async def run_ingestion():
             logger.info(f"Unified Loop: Active class found: {subject} (Ends: {end_str}). Triggering targeted headed join...")
             update_ingestion_status("processing", details=f"Launching targeted browser to join class: {subject}", subject=subject)
             
-            # Transition session status to CONNECTING
+            # Transition session status to CONNECTING with active class metadata
             try:
                 from .session_status import update_session_status
-                update_session_status("CONNECTING")
+                update_session_status(
+                    "CONNECTING",
+                    subject=active_class.get("subject_code"),
+                    title=active_class.get("subject_name"),
+                    instructor=active_class.get("faculty")
+                )
             except Exception as status_err:
                 logger.error(f"Failed to update session status to CONNECTING: {status_err}")
             
@@ -422,8 +449,20 @@ async def run_ingestion():
                 browser, context, page = await create_browser_and_page(p)
                 
                 try:
-                    await perform_login(page)
-                    logger.info("[JOIN_PHASE] Login successful")
+                    # Stage C: before_join screenshot
+                    try:
+                        timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                        screenshot_path = get_screenshot_path(f"before_join_{timestamp}.png")
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        logger.info(f"Screenshot saved: {screenshot_path}")
+                    except Exception as ss_e:
+                        logger.error(f"Screenshot failed at before_join: {ss_e}")
+
+                    if not settings.DEBUG_MODE:
+                        await perform_login(page)
+                        logger.info("[JOIN_PHASE] Login successful")
+                    else:
+                        logger.info("[JOIN_PHASE] DEBUG_MODE active: bypassing real login flow.")
                     
                     # Target join success loop
                     join_success = False
@@ -440,17 +479,25 @@ async def run_ingestion():
                             if attempt < join_attempts_limit:
                                 await asyncio.sleep(join_failure_cooldown)
                                 
-                    if not join_success:
+                    if join_success == "FACULTY_NOT_STARTED":
+                        logger.info("Unified Loop: Faculty did not start the class. Completing lifecycle immediately.")
+                        update_ingestion_status("idle", details="Faculty did not start the class.")
+                        
+                        # Set this class as completed in cache to prevent re-joining
+                        active_class["status"] = "COMPLETED"
+                        timetable_cache.set_timetable(classes)
+                        
+                    elif not join_success:
                         logger.error("Unified Loop: Failed to join class after maximum attempts.")
                         update_ingestion_status("failed", error="Failed to join active lecture")
                         
-                        # Capture join failure screenshot
-                        now_str = get_now_ist().strftime("%Y-%m-%d_%H%M%S")
-                        ss_filename = f"join_failed_{now_str}.png"
-                        ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
+                        # Capture join failure screenshot (Stage F: failure)
+                        timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                        ss_filename = f"failure_{timestamp}.png"
+                        ss_path = get_screenshot_path(ss_filename)
                         try:
                             if page and not page.is_closed():
-                                await page.screenshot(path=ss_path)
+                                await page.screenshot(path=ss_path, full_page=True)
                                 logger.info(f"Join Failed: Saved validation screenshot to {ss_path}")
                                 from .session_status import update_session_status
                                 update_session_status(
@@ -468,13 +515,13 @@ async def run_ingestion():
                         # Wait an extra 5 seconds for UI elements/layout to stabilize
                         await asyncio.sleep(5)
                         
-                        # Capture join success screenshot
-                        now_str = get_now_ist().strftime("%Y-%m-%d_%H%M%S")
-                        ss_filename = f"join_success_{now_str}.png"
-                        ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
+                        # Capture join success screenshot (Stage D: connected)
+                        timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                        ss_filename = f"connected_{timestamp}.png"
+                        ss_path = get_screenshot_path(ss_filename)
                         try:
-                            await page.screenshot(path=ss_path)
-                            logger.info(f"Join Success: Saved validation screenshot to {ss_path}")
+                            await page.screenshot(path=ss_path, full_page=True)
+                            logger.info(f"Join Success (Connected): Saved validation screenshot to {ss_path}")
                             logger.info("[JOIN_PHASE] Join success screenshot captured")
                             from .session_status import update_session_status
                             update_session_status(
@@ -547,17 +594,17 @@ async def run_ingestion():
                     logger.error(f"Unified Loop: targeted class session execution failed: {e}")
                     update_ingestion_status("failed", error=str(e))
                 finally:
-                    # Capture disconnect screenshot if we were previously connected
+                    # Capture disconnect screenshot if we were previously connected (Stage E: disconnect)
                     try:
                         from .session_status import get_session_status, update_session_status
                         current_status = get_session_status()
                         if current_status.get("status") == "CONNECTED":
-                            now_str = get_now_ist().strftime("%Y-%m-%d_%H%M%S")
-                            ss_filename = f"disconnect_{now_str}.png"
-                            ss_path = os.path.join(settings.SCREENSHOTS_DIR, ss_filename)
+                            timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                            ss_filename = f"disconnect_{timestamp}.png"
+                            ss_path = get_screenshot_path(ss_filename)
                             try:
                                 if page and not page.is_closed():
-                                    await page.screenshot(path=ss_path)
+                                    await page.screenshot(path=ss_path, full_page=True)
                                     logger.info(f"Disconnect Check: Captured validation screenshot at {ss_path}.")
                             except Exception as ss_e:
                                 logger.error(f"Disconnect Check: Failed to capture validation screenshot: {ss_e}")
@@ -575,6 +622,13 @@ async def run_ingestion():
                     logger.info("Unified Loop: Targeted browser closed, releasing system memory.")
                     logger.info("[SESSION_END] Browser context closed")
                     logger.info("[SESSION_END] Returning to scheduler standby")
+                    if settings.DEMO_MODE:
+                        logger.info("=== DEMO_MODE SINGLE RUN COMPLETE, GOING IDLE ===")
+                        while True:
+                            await asyncio.sleep(3600)
+                    elif settings.DEBUG_MODE:
+                        logger.info("=== DEBUG_MODE SINGLE RUN COMPLETE, BREAKING LOOP ===")
+                        break
                     
         elif next_upcoming_class:
             # We have an upcoming class. Determine smart sleep duration (until 5 minutes before start)

@@ -5,6 +5,7 @@ pydantic-settings==2.7.1
 fastapi==0.115.6
 uvicorn==0.34.0
 python-multipart==0.0.20
-pyjwt==2.10.1
+PyJWT==2.10.1
 redis==5.0.4
 prometheus-client==0.20.0
+aiohttp==3.9.5
