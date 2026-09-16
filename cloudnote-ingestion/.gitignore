@@ -22,3 +22,8 @@ ms-playwright/
 # OS
 .DS_Store
 Thumbs.db
+
+# Virtual environments
+.venv/
+venv/
+env/

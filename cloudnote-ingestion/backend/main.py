@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import PlainTextResponse, HTMLResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
 from app.database import get_db_connection, init_db
@@ -478,6 +478,120 @@ def sync_timetable(current_user: dict = Depends(get_current_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to queue sync request: {e}"
         )
+
+def resolve_latest_no_classes_screenshot():
+    """
+    Safely resolves the latest zero-class verification screenshot for today.
+    Returns (abs_file_path, filename, verified_at) or (None, None, None).
+    Guarantees strict path traversal protection.
+    """
+    b_dir = os.path.dirname(os.path.abspath(__file__))
+    c_file = os.path.abspath(os.path.join(b_dir, "..", "logs", "timetable_cache.json"))
+    s_dir = os.path.abspath(os.path.join(b_dir, "..", "screenshots"))
+
+    target_filename = None
+    target_verified_at = None
+
+    from datetime import timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+    today_local = datetime.now().strftime("%Y-%m-%d")
+    allowed_dates = {today_ist, today_local}
+
+    # 1. Inspect timetable cache first
+    if os.path.exists(c_file):
+        try:
+            with open(c_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                cache_date = data.get("date")
+                if cache_date in allowed_dates:
+                    fn = data.get("no_classes_screenshot")
+                    if fn and fn.startswith("no_classes_") and fn.endswith(".png"):
+                        cand = os.path.abspath(os.path.join(s_dir, fn))
+                        if os.path.commonpath([s_dir, cand]) == s_dir and os.path.isfile(cand):
+                            target_filename = fn
+                            target_verified_at = data.get("verified_at")
+        except Exception as e:
+            print(f"[DEBUG] Error reading timetable cache for screenshot: {e}")
+
+    # 2. Resilient fallback: Scan screenshots directory for today's files
+    if not target_filename:
+        try:
+            candidates = []
+            if os.path.exists(s_dir):
+                for entry in os.listdir(s_dir):
+                    if entry.startswith("no_classes_") and entry.endswith(".png"):
+                        # Format: no_classes_YYYY-MM-DD_HH-MM-SS.png
+                        parts = entry.replace("no_classes_", "").replace(".png", "").split("_")
+                        if parts and parts[0] in allowed_dates:
+                            full_p = os.path.abspath(os.path.join(s_dir, entry))
+                            if os.path.commonpath([s_dir, full_p]) == s_dir and os.path.isfile(full_p):
+                                candidates.append((full_p, entry, os.path.getmtime(full_p)))
+            if candidates:
+                candidates.sort(key=lambda x: x[2], reverse=True)
+                full_p, entry, _ = candidates[0]
+                target_filename = entry
+                try:
+                    ts_part = entry.replace("no_classes_", "").replace(".png", "")
+                    ts_dt = datetime.strptime(ts_part, "%Y-%m-%d_%H-%M-%S")
+                    target_verified_at = ts_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    target_verified_at = None
+        except Exception as scan_err:
+            print(f"[DEBUG] Error scanning screenshots directory: {scan_err}")
+
+    if target_filename:
+        full_p = os.path.abspath(os.path.join(s_dir, target_filename))
+        if os.path.commonpath([s_dir, full_p]) == s_dir and os.path.isfile(full_p):
+            return full_p, target_filename, target_verified_at
+
+    return None, None, None
+
+@app.get("/api/timetable/no-classes-info")
+def get_no_classes_info():
+    """Returns metadata about today's zero-class timetable verification screenshot."""
+    file_path, filename, verified_at = resolve_latest_no_classes_screenshot()
+    if not file_path:
+        return {
+            "available": False,
+            "filename": None,
+            "url": None,
+            "verified_at": None
+        }
+    return {
+        "available": True,
+        "filename": filename,
+        "url": f"/screenshots/{filename}",
+        "verified_at": verified_at
+    }
+
+@app.get("/api/timetable/no-classes-screenshot")
+def get_no_classes_screenshot(info: bool = False):
+    """
+    Returns the latest zero-class timetable verification screenshot for today.
+    If info=True, returns JSON metadata. Otherwise returns the image FileResponse.
+    Returns HTTP 404 if no verification screenshot exists for today.
+    """
+    file_path, filename, verified_at = resolve_latest_no_classes_screenshot()
+    if not file_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No timetable verification screenshot found for today."
+        )
+
+    if info:
+        return {
+            "available": True,
+            "filename": filename,
+            "url": f"/screenshots/{filename}",
+            "verified_at": verified_at
+        }
+
+    headers = {
+        "Cache-Control": "no-cache, must-revalidate",
+        "X-Verified-At": str(verified_at or "")
+    }
+    return FileResponse(file_path, media_type="image/png", headers=headers)
 
 # 3. Retrieve all summaries scoped to the authenticated user
 @app.get("/api/summaries", response_model=List[LectureSummaryResponse])

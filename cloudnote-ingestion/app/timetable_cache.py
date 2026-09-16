@@ -14,6 +14,8 @@ class TimetableCache:
             cls._instance = super(TimetableCache, cls).__new__(cls, *args, **kwargs)
             cls._instance.classes = []
             cls._instance.last_fetch_date = None
+            cls._instance.no_classes_screenshot = None
+            cls._instance.verified_at = None
             cls._instance.load_from_disk()
         return cls._instance
 
@@ -25,6 +27,8 @@ class TimetableCache:
                     data = json.load(f)
                     self.last_fetch_date = data.get("date")
                     self.classes = data.get("classes", [])
+                    self.no_classes_screenshot = data.get("no_classes_screenshot")
+                    self.verified_at = data.get("verified_at")
                     logger.info(f"Cache: Loaded {len(self.classes)} classes from disk for date {self.last_fetch_date}.")
             except Exception as e:
                 logger.warning(f"Cache: Failed to load from disk due to corruption: {e}. Deleting corrupted cache and regenerating a clean state.")
@@ -35,16 +39,20 @@ class TimetableCache:
                     logger.error(f"Cache: Failed to delete corrupted cache file: {del_e}")
                 self.last_fetch_date = None
                 self.classes = []
+                self.no_classes_screenshot = None
+                self.verified_at = None
                 self.save_to_disk()
 
     def save_to_disk(self):
-        """Persists today's class list to disk."""
+        """Persists today's class list and verification screenshot metadata to disk."""
         try:
             os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "date": self.last_fetch_date,
-                    "classes": self.classes
+                    "classes": self.classes,
+                    "no_classes_screenshot": getattr(self, "no_classes_screenshot", None),
+                    "verified_at": getattr(self, "verified_at", None)
                 }, f, indent=2)
             logger.info("Cache: Persisted active schedule to disk.")
         except Exception as e:
@@ -55,7 +63,7 @@ class TimetableCache:
         from datetime import timezone, timedelta
         IST = timezone(timedelta(hours=5, minutes=30))
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
-        return self.last_fetch_date == today_str and len(self.classes) > 0
+        return self.last_fetch_date == today_str
 
     def get_timetable(self):
         """Returns the cached timetable if it is valid for today, otherwise returns empty list."""
@@ -66,18 +74,38 @@ class TimetableCache:
             return []
         return self.classes
 
-    def set_timetable(self, classes_list):
+    def set_timetable(self, classes_list, no_classes_screenshot=None, verified_at=None):
         """Sets today's class list and immediately flushes to disk."""
         from datetime import timezone, timedelta
         IST = timezone(timedelta(hours=5, minutes=30))
         self.classes = classes_list
         self.last_fetch_date = datetime.now(IST).strftime("%Y-%m-%d")
+        if no_classes_screenshot is not None:
+            self.no_classes_screenshot = no_classes_screenshot
+            self.verified_at = verified_at
+        elif len(classes_list) > 0:
+            self.no_classes_screenshot = None
+            self.verified_at = None
         self.save_to_disk()
+
+    def set_no_classes_screenshot(self, filename: str, verified_at: str):
+        """Sets the zero-class verification screenshot filename and timestamp."""
+        self.no_classes_screenshot = filename
+        self.verified_at = verified_at
+        self.save_to_disk()
+
+    def get_no_classes_screenshot(self):
+        """Returns (filename, verified_at) if valid for today, else (None, None)."""
+        if not self.is_valid_for_today():
+            return None, None
+        return self.no_classes_screenshot, self.verified_at
 
     def mark_stale(self):
         """Forcibly voids the cache date to trigger a new unified fetch session."""
         self.last_fetch_date = None
         self.classes = []
+        self.no_classes_screenshot = None
+        self.verified_at = None
         if os.path.exists(CACHE_FILE):
             try:
                 os.remove(CACHE_FILE)

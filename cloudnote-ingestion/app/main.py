@@ -295,12 +295,7 @@ async def run_ingestion():
             sync_requested = False
         else:
             classes = timetable_cache.get_timetable()
-            IST = timezone(timedelta(hours=5, minutes=30))
-            today_str = datetime.now(IST).strftime("%Y-%m-%d")
-            cache_valid = (
-                timetable_cache.last_fetch_date == today_str
-                and len(classes) > 0
-            )
+            cache_valid = timetable_cache.is_valid_for_today()
             sync_requested = timetable_cache.is_sync_requested()
         
         logger.info(f"DEBUG CACHE CLASS COUNT: {len(classes)}")
@@ -668,14 +663,18 @@ async def run_ingestion():
                 await asyncio.sleep(10)
                 
         else:
-            # All scheduled classes today are finished. Sleep until the next day's refresh window (e.g. 8:00 AM)
-            logger.info("Unified Loop: All scheduled classes for today have been completed successfully.")
+            if len(classes) == 0:
+                logger.info("Unified Loop: No classes scheduled for today.")
+                status_details = "No classes scheduled for today. Resting until tomorrow."
+            else:
+                logger.info("Unified Loop: All scheduled classes for today have been completed successfully.")
+                status_details = "All classes completed for today. Resting until tomorrow."
             current_ist = get_now_ist()
             tomorrow_8am = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
             sleep_duration = (tomorrow_8am - current_ist).total_seconds()
             
             logger.info(f"Unified Loop: Entering smart sleep until tomorrow 8:00 AM ({sleep_duration} seconds) for new day rollover...")
-            update_ingestion_status("idle", details="All classes completed for today. Resting until tomorrow.")
+            update_ingestion_status("idle", details=status_details)
             
             target_time = asyncio.get_event_loop().time() + sleep_duration
             while asyncio.get_event_loop().time() < target_time:

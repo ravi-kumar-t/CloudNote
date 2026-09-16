@@ -187,4 +187,32 @@ async def fetch_timetable_data(page: Page) -> list:
     await extract_visible_cards(today)
         
     logger.info(f"Timetable Scraper: Extraction complete. Collected {len(classes)} unique classes.")
+
+    if len(classes) == 0:
+        logger.info("No classes detected for today. Capturing timetable screenshot...")
+        from .utils import get_now_ist
+        from .config import get_screenshot_path
+        timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+        ss_filename = f"no_classes_{timestamp}.png"
+        ss_path = get_screenshot_path(ss_filename)
+        try:
+            await page.wait_for_timeout(1000)
+            await page.screenshot(path=ss_path, full_page=True)
+            logger.info(f"Timetable screenshot saved: {ss_path}")
+
+            # Clean up prior zero-class screenshot for today to avoid accumulating duplicates
+            old_ss = getattr(timetable_cache, "no_classes_screenshot", None)
+            if old_ss and old_ss != ss_filename:
+                try:
+                    old_path = get_screenshot_path(old_ss)
+                    if os.path.exists(old_path):
+                        os.remove(old_path)
+                except Exception as rm_err:
+                    logger.debug(f"Could not remove older verification screenshot {old_ss}: {rm_err}")
+
+            verified_at = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
+            timetable_cache.set_no_classes_screenshot(ss_filename, verified_at)
+        except Exception as ss_e:
+            logger.error(f"Failed to capture timetable screenshot: {ss_e}")
+
     return classes

@@ -15,3 +15,8 @@ logs/
 # Screenshots
 screenshots/
 *.png
+
+# Virtual environments
+.venv/
+venv/
+env/

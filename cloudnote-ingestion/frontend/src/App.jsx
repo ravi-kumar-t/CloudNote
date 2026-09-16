@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LogOut, BookOpen, Search, FileText, Calendar, Compass, ListChecks, HelpCircle, X } from 'lucide-react';
+import { LogOut, BookOpen, Search, FileText, Calendar, Compass, ListChecks, HelpCircle, X, ShieldCheck } from 'lucide-react';
 import './App.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -59,6 +59,8 @@ function App() {
   const [dashboardError, setDashboardError] = useState('');
   const [ingestionStatus, setIngestionStatus] = useState(null);
   const [timetable, setTimetable] = useState([]);
+  const [noClassesProof, setNoClassesProof] = useState(null);
+  const [proofImageFailed, setProofImageFailed] = useState(false);
   const [sessionStatus, setSessionStatus] = useState(null);
   const [modalScreenshot, setModalScreenshot] = useState(null);
   const [classHistory, setClassHistory] = useState([]);
@@ -103,12 +105,38 @@ function App() {
     }
   };
 
+  // No-Classes Timetable Verification Proof Fetching
+  const fetchNoClassesProof = async (authToken) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/timetable/no-classes-info`, {
+        headers: authToken ? {
+          'Authorization': `Bearer ${authToken}`
+        } : {}
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.available) {
+          setNoClassesProof(data);
+          setProofImageFailed(false);
+        } else {
+          setNoClassesProof(null);
+        }
+      } else {
+        setNoClassesProof(null);
+      }
+    } catch (err) {
+      console.error('Failed to fetch no-classes verification proof:', err);
+      setNoClassesProof(null);
+    }
+  };
+
   // Synchronize token state
   useEffect(() => {
     if (token) {
       setView('dashboard');
       fetchSummaries(token);
       fetchTimetable(token);
+      fetchNoClassesProof(token);
       fetchSessionStatus(token);
     } else {
       setView('auth');
@@ -258,11 +286,13 @@ function App() {
       fetchIngestionStatus(token);
       fetchSessionStatus(token);
       fetchTimetable(token);
+      fetchNoClassesProof(token);
       fetchClassHistory(token);
       const interval = setInterval(() => {
         fetchIngestionStatus(token);
         fetchSessionStatus(token);
         fetchTimetable(token);
+        fetchNoClassesProof(token);
         fetchClassHistory(token);
       }, 10000);
       return () => clearInterval(interval);
@@ -510,6 +540,43 @@ function App() {
               <div className="timetable-empty">
                 <p>No classes scheduled for today.</p>
                 <p className="timetable-empty-sub">Schedules are automatically fetched and updated by the background intelligence loop.</p>
+
+                {noClassesProof && noClassesProof.available && !proofImageFailed && (
+                  <div className="timetable-verification-card">
+                    <div className="verification-header-row">
+                      <ShieldCheck size={18} color="#10b981" />
+                      <span className="verification-title">Timetable verification:</span>
+                    </div>
+
+                    <div
+                      className="verification-screenshot-frame"
+                      title="Click to enlarge timetable verification screenshot"
+                      onClick={() => setModalScreenshot({
+                        title: "Timetable Verification (Zero Classes Scheduled)",
+                        meta: `Verified at: ${formatTimestamp(noClassesProof.verified_at)}`,
+                        src: noClassesProof.url.startsWith('http')
+                          ? noClassesProof.url
+                          : `${API_BASE}${noClassesProof.url}`
+                      })}
+                    >
+                      <img
+                        src={noClassesProof.url.startsWith('http')
+                          ? noClassesProof.url
+                          : `${API_BASE}${noClassesProof.url}`}
+                        alt="Zero Classes Calendar Verification"
+                        onError={() => setProofImageFailed(true)}
+                        className="verification-img"
+                      />
+                      <div className="screenshot-zoom-hint">Click to enlarge</div>
+                    </div>
+
+                    {noClassesProof.verified_at && (
+                      <div className="verification-timestamp-badge">
+                        <span>Verified at: <strong>{formatTimestamp(noClassesProof.verified_at)}</strong></span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="timetable-grid">
