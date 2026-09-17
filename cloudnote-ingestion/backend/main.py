@@ -12,8 +12,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
-
 from app.database import get_db_connection, init_db
+from app.config import settings
 
 # Ensure SQLite schema initialized on server start
 init_db()
@@ -176,12 +176,8 @@ async def track_prometheus_requests(request, call_next):
     response = await call_next(request)
     return response
 
-# JWT Configurations
-JWT_SECRET = "cloudnote_premium_jwt_secret_key_888"
-JWT_ALGORITHM = "HS256"
-SALT = b"cloudnote_secure_hash_salt_999"
-
 # Security utilities (disabling generic auto-error to prevent raw 403 blocks)
+SALT = b"cloudnote_secure_hash_salt_999"
 security = HTTPBearer(auto_error=False)
 
 def hash_password(password: str) -> str:
@@ -189,13 +185,13 @@ def hash_password(password: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), SALT, 100000).hex()
 
 def create_access_token(username: str) -> str:
-    """Generates JWT token valid for 24 hours."""
-    expire = datetime.now(timezone.utc) + timedelta(hours=24)
+    """Generates JWT token valid for the configured duration."""
+    expire = datetime.now(timezone.utc) + timedelta(hours=settings.ACCESS_TOKEN_EXPIRE_HOURS)
     payload = {
         "sub": username,
         "exp": expire
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
     """Dependency injection to authenticate and inject the active user context."""
@@ -206,7 +202,7 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
         )
     token = credentials.credentials
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         username = payload.get("sub")
         if not username:
             raise HTTPException(

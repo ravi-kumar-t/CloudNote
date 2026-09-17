@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     MAX_REJOIN_ATTEMPTS: int = 3
     REDIS_URL: Optional[str] = "redis://redis:6379/0"
 
+    # JWT Authentication Settings
+    JWT_SECRET: str = "your_jwt_secret"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_HOURS: int = 24
+
 
     
 settings = Settings()
