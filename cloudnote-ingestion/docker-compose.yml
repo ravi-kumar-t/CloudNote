@@ -54,18 +54,21 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # 3. Ingestion Worker
-  ingestion-worker:
+  # 3. Autonomous Timetable Scheduler
+  scheduler:
     build:
       context: .
       dockerfile: Dockerfile
 
-    container_name: cloudnote-ingestion-worker
+    container_name: cloudnote-scheduler
+    command: ["python", "-m", "app.scheduler"]
     restart: unless-stopped
 
     depends_on:
       backend:
         condition: service_healthy
+      redis:
+        condition: service_started
 
     init: true
     shm_size: "1gb"
@@ -88,15 +91,52 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 4. Redis
+  # 4. Decoupled Ingestion Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: cloudnote-worker
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+    init: true
+    shm_size: "1gb"
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+
+    environment:
+      - DB_PATH=/app/logs/cloudnote.db
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/0
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 5. Redis
   redis:
     image: redis:7-alpine
 
     container_name: cloudnote-redis
     restart: unless-stopped
 
-    expose:
-      - "6379"
+    ports:
+      - "6379:6379"
 
     logging:
       driver: "json-file"
