@@ -3,15 +3,19 @@ import os
 import urllib.request
 import urllib.error
 from datetime import datetime
+from typing import Optional, Union
 from .logger import logger
 from .config import settings
 
-def summarize_lecture(lecture_text: str, subject: str = None) -> dict:
+def summarize_lecture(lecture_text: str, subject: str = None, username: Optional[str] = None, user_id: Optional[int] = None) -> dict:
     """
     Summarizes lecture text using the Gemini API.
     Zero-dependency implementation using built-in urllib.
     Isolates all failures to prevent blocking the worker's graceful shutdown.
+    Supports user-scoped persistence when username and user_id are supplied.
     """
+    target_user = username or settings.LPU_USERNAME
+
     # 1. Verification and API Key check
     api_key = settings.GEMINI_API_KEY
     if not api_key:
@@ -20,23 +24,24 @@ def summarize_lecture(lecture_text: str, subject: str = None) -> dict:
         if subject:
             fallback["subject"] = subject
         try:
-            save_summary_atomically(settings.LPU_USERNAME, fallback)
+            save_summary_atomically(target_user, fallback, user_id=user_id)
         except Exception:
             pass
         return fallback
-        
+
     if not lecture_text.strip():
         logger.warning("Gemini Service: Extracted lecture text is empty. Summarization skipped.")
         fallback = generate_fallback_summary("No lecture content was captured.")
         if subject:
             fallback["subject"] = subject
         try:
-            save_summary_atomically(settings.LPU_USERNAME, fallback)
+            save_summary_atomically(target_user, fallback, user_id=user_id)
         except Exception:
             pass
         return fallback
 
     logger.info("Gemini Service: Submitting lecture text for AI summarization...")
+
     
     # 2. Build the lightweight REST API URL and JSON payload
     # Using gemini-2.5-flash for speed and premium JSON structuring
@@ -94,11 +99,11 @@ def summarize_lecture(lecture_text: str, subject: str = None) -> dict:
             
             # Save the final summary output
             try:
-                save_summary_atomically(settings.LPU_USERNAME, structured_data)
+                save_summary_atomically(target_user, structured_data, user_id=user_id)
             except Exception:
                 pass
             return structured_data
-            
+
     except urllib.error.HTTPError as http_err:
         err_body = http_err.read().decode('utf-8', errors='ignore')
         logger.warning(f"Gemini Service: API HTTP error (Code {http_err.code}): {err_body}")
@@ -106,13 +111,13 @@ def summarize_lecture(lecture_text: str, subject: str = None) -> dict:
     except Exception as e:
         logger.warning(f"Gemini Service: API execution failed gracefully: {e}")
         logger.error(f"[STRUCTURED] {json.dumps({'event': 'gemini_request_failed', 'error': str(e), 'timestamp': datetime.now().isoformat()})}")
-        
+
     # 4. Return fallback JSON on any failure to isolate issues
     fallback = generate_fallback_summary("AI generation encountered an unexpected API or network failure.")
     if subject:
         fallback["subject"] = subject
     try:
-        save_summary_atomically(settings.LPU_USERNAME, fallback)
+        save_summary_atomically(target_user, fallback, user_id=user_id)
     except Exception:
         pass
     return fallback
@@ -125,42 +130,49 @@ def generate_fallback_summary(reason: str) -> dict:
         "key_points": ["Review logs/raw_lecture.txt for the raw captured text stream."]
     }
 
-def save_summary_atomically(username: str, summary_data: dict) -> int:
+def save_summary_atomically(username: str, summary_data: dict, user_id: Optional[int] = None) -> int:
     """
-    Saves the structured JSON summary to logs/ai_summary.json and a timestamped file on disk,
-    and inserts it into the SQLite database. Ensures atomic persistence: if either step fails,
-    both files on disk are cleaned up to guarantee consistency.
+    Saves the structured JSON summary to logs/ai_summary.json (or user partitioned logs)
+    and a timestamped file on disk, and inserts it into the SQLite database.
+    Ensures atomic persistence: if either step fails, both files on disk are cleaned up.
     Returns the database row ID.
     """
     files_written = []
     db_written = False
-    
-    ai_summary_path = settings.AI_SUMMARY_FILE
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    timestamped_file = os.path.join(
-        os.path.dirname(settings.AI_SUMMARY_FILE),
-        f"ai_summary_{timestamp}.json"
-    )
-    
+
+    if user_id is not None:
+        from .database import get_user_logs_dir
+        user_dir = get_user_logs_dir(user_id)
+        ai_summary_path = os.path.join(user_dir, "ai_summary.json")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamped_file = os.path.join(user_dir, f"ai_summary_{timestamp}.json")
+    else:
+        ai_summary_path = settings.AI_SUMMARY_FILE
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamped_file = os.path.join(
+            os.path.dirname(settings.AI_SUMMARY_FILE),
+            f"ai_summary_{timestamp}.json"
+        )
+
     try:
         # 1. Create directory and save to disk
         os.makedirs(os.path.dirname(ai_summary_path), exist_ok=True)
-        
+
         with open(ai_summary_path, "w", encoding="utf-8") as f:
             json.dump(summary_data, f, indent=2)
         files_written.append(ai_summary_path)
-            
+
         with open(timestamped_file, "w", encoding="utf-8") as f:
             json.dump(summary_data, f, indent=2)
         files_written.append(timestamped_file)
-        
+
         logger.info(f"Gemini Service: Saved persistent AI summary to disk: {files_written}")
-        
-        # 2. Persist to SQLite DB under the LPU account
+
+        # 2. Persist to SQLite DB under the targeted account
         from .database import save_summary_to_db
-        row_id = save_summary_to_db(username, summary_data)
+        row_id = save_summary_to_db(username, summary_data, user_id=user_id)
         db_written = True
-        
+
         return row_id
         
     except Exception as save_err:

@@ -1,4 +1,5 @@
 import asyncio
+from typing import Optional, Union
 from .logger import logger
 from .selectors import MeetingSelectors
 from .config import settings
@@ -83,14 +84,23 @@ async def check_session_health(page, browser) -> bool:
         logger.warning(f"Watchdog Health Check: Exception encountered: {e}")
         return False
 
-async def attempt_recovery(page, browser, context, p, join_url: str = None):
-    """Executes the 3-step recovery watchdog pipeline."""
+async def attempt_recovery(
+    page,
+    browser,
+    context,
+    p,
+    join_url: str = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    user_id: Optional[Union[int, str]] = None
+):
+    """Executes the 3-step recovery watchdog pipeline with support for explicit user context."""
     logger.info("[RECOVERY] Starting session recovery watchdog process...")
-    
+
     # Transition session status to RECOVERING
     try:
         from .session_status import update_session_status
-        update_session_status("RECOVERING")
+        update_session_status("RECOVERING", user_id=user_id)
     except Exception as status_err:
         logger.error(f"[RECOVERY] Failed to update session status to RECOVERING: {status_err}")
     
@@ -115,7 +125,7 @@ async def attempt_recovery(page, browser, context, p, join_url: str = None):
                 logger.info("[RECOVERY] Watchdog Step 1 Success: Reconnected successfully via reload.")
                 
                 # Restore status to CONNECTED
-                update_session_status("CONNECTED")
+                update_session_status("CONNECTED", user_id=user_id)
                 return page, browser, context
             else:
                 logger.warning("[RECOVERY] Watchdog Step 1 Failed: Page reloaded but meeting room is not present.")
@@ -143,9 +153,9 @@ async def attempt_recovery(page, browser, context, p, join_url: str = None):
         
         # Perform login
         from .login import perform_login
-        await perform_login(new_page)
+        await perform_login(new_page, username=username, password=password, user_id=user_id)
         logger.info("[RECOVERY] Watchdog Step 2 Success: Re-login succeeded.")
-        
+
     except Exception as e:
         log_err_msg = f"[RECOVERY] Watchdog Step 2 Failed: Re-login failed: {e}"
         logger.error(log_err_msg)
@@ -160,16 +170,16 @@ async def attempt_recovery(page, browser, context, p, join_url: str = None):
         except:
             pass
         return None
-        
+
     # Step 3: Re-open lecture
     logger.info("[RECOVERY] Watchdog Recovery Step 3: Attempting to Re-open Lecture...")
     try:
         from .joiner import join_class_pipeline
-        joined = await join_class_pipeline(new_page, join_url=join_url)
+        joined = await join_class_pipeline(new_page, join_url=join_url, user_id=user_id)
         if joined:
             logger.info("[RECOVERY] Watchdog Step 3 Success: Re-opened and re-joined lecture successfully.")
             # Restore status to CONNECTED
-            update_session_status("CONNECTED")
+            update_session_status("CONNECTED", user_id=user_id)
             return new_page, new_browser, new_context
         else:
             logger.error("[RECOVERY] Watchdog Step 3 Failed: Could not re-join lecture.")

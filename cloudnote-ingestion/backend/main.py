@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from app.database import get_db_connection, init_db
 from app.config import settings
+from app.crypto import encrypt_portal_password
 
 # Ensure SQLite schema initialized on server start
 init_db()
@@ -208,7 +209,7 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
             
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, username, email FROM users WHERE username = ?", (username,))
+        cursor.execute("SELECT id, username, email, lpu_username FROM users WHERE username = ?", (username,))
         row = cursor.fetchone()
         conn.close()
         
@@ -218,7 +219,12 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
                 detail="Authentication failed: Active profile not found."
             )
             
-        return {"id": row["id"], "username": row["username"], "email": row["email"]}
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "email": row["email"],
+            "lpu_username": row["lpu_username"] or row["username"]
+        }
     except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -230,6 +236,8 @@ class UserRegister(BaseModel):
     username: str
     password: str
     email: str
+    lpu_username: Optional[str] = None
+
 
 class UserLogin(BaseModel):
     username: str
@@ -304,9 +312,12 @@ def register_user(user: UserRegister):
             )
             
         hashed = hash_password(user.password)
+        lpu_user = user.lpu_username.strip() if user.lpu_username and user.lpu_username.strip() else user.username
+        enc_portal_pw = encrypt_portal_password(user.password, settings.JWT_SECRET)
+
         cursor.execute(
-            "INSERT INTO users (username, hashed_password, email) VALUES (?, ?, ?)",
-            (user.username, hashed, user.email)
+            "INSERT INTO users (username, hashed_password, email, lpu_username, encrypted_portal_password) VALUES (?, ?, ?, ?, ?)",
+            (user.username, hashed, user.email, lpu_user, enc_portal_pw)
         )
         conn.commit()
         conn.close()
@@ -326,18 +337,32 @@ def login_user(credentials: UserLogin):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT hashed_password FROM users WHERE username = ?",
+            "SELECT id, hashed_password, encrypted_portal_password FROM users WHERE username = ?",
             (credentials.username,)
         )
         row = cursor.fetchone()
-        conn.close()
         
         if not row or row["hashed_password"] != hash_password(credentials.password):
+            conn.close()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid username or password credentials."
             )
             
+        # Non-destructive backfill of encrypted_portal_password for existing accounts
+        if not row["encrypted_portal_password"]:
+            try:
+                enc_portal_pw = encrypt_portal_password(credentials.password, settings.JWT_SECRET)
+                cursor.execute(
+                    "UPDATE users SET encrypted_portal_password = ? WHERE id = ?",
+                    (enc_portal_pw, row["id"])
+                )
+                conn.commit()
+            except Exception:
+                pass
+
+        conn.close()
+
         token = create_access_token(credentials.username)
         return {
             "access_token": token,

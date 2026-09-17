@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional, Union
 from datetime import datetime
 from .logger import logger
 
@@ -119,9 +120,10 @@ def update_session_status(
     disconnect_time: str = None,
     subject: str = None,
     title: str = None,
-    instructor: str = None
+    instructor: str = None,
+    user_id: Optional[Union[int, str]] = None
 ):
-    """Updates and commits the runtime session status and persistent historical proof to logs/session_status.json."""
+    """Updates and commits the runtime session status and persistent historical proof to logs/session_status.json and user partitions."""
     current = get_session_status()
     current["status"] = status
     
@@ -184,6 +186,22 @@ def update_session_status(
             }
         }
         append_to_history(entry)
+        if user_id is not None:
+            try:
+                from .database import record_attendance_session
+                record_attendance_session(
+                    user_id=int(user_id),
+                    subject=current.get("subject") or subject or "Lecture",
+                    title=current.get("title") or title or "Class Lecture",
+                    instructor=current.get("instructor") or instructor or "N/A",
+                    status="FAILED",
+                    joined_at=None,
+                    ended_at=current["timestamp"],
+                    session_duration="N/A",
+                    screenshots={"failure": f"/screenshots/{user_id}/{screenshot}" if screenshot else None}
+                )
+            except Exception as e:
+                logger.warning(f"SessionStatus: Failed to record user attendance session: {e}")
     elif status == "FACULTY_NOT_STARTED":
         entry = {
             "subject": current.get("subject") or subject or "Lecture",
@@ -197,6 +215,22 @@ def update_session_status(
             }
         }
         append_to_history(entry)
+        if user_id is not None:
+            try:
+                from .database import record_attendance_session
+                record_attendance_session(
+                    user_id=int(user_id),
+                    subject=current.get("subject") or subject or "Lecture",
+                    title=current.get("title") or title or "Class Lecture",
+                    instructor=current.get("instructor") or instructor or "N/A",
+                    status="FACULTY_NOT_STARTED",
+                    joined_at=None,
+                    ended_at=current["timestamp"],
+                    session_duration="N/A",
+                    screenshots={"connected": f"/screenshots/{user_id}/{screenshot}" if screenshot else None}
+                )
+            except Exception as e:
+                logger.warning(f"SessionStatus: Failed to record user attendance session: {e}")
     elif status == "DISCONNECTED":
         entry = {
             "subject": current.get("subject") or "Lecture",
@@ -274,7 +308,39 @@ def update_session_status(
                 ls["session_duration"] = "N/A"
         else:
             ls["session_duration"] = "N/A"
-            
+
+        # Record connected session in user attendance records if user_id present
+        if user_id is not None:
+            try:
+                from .database import record_attendance_session
+                record_attendance_session(
+                    user_id=int(user_id),
+                    subject=current.get("subject") or subject or "Lecture",
+                    title=current.get("title") or title or "Class Lecture",
+                    instructor=current.get("instructor") or instructor or "N/A",
+                    status="CONNECTED",
+                    joined_at=ls.get("joined_at"),
+                    ended_at=ls.get("disconnected_at") or current["timestamp"],
+                    session_duration=ls.get("session_duration"),
+                    screenshots={
+                        "connected": f"/screenshots/{user_id}/{ls.get('latest_join_screenshot')}" if ls.get("latest_join_screenshot") else None,
+                        "disconnect": f"/screenshots/{user_id}/{screenshot}" if screenshot else None
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"SessionStatus: Failed to record user attendance session on disconnect: {e}")
+
+    # User-partitioned status JSON
+    if user_id is not None:
+        try:
+            from .database import get_user_logs_dir
+            user_status_file = os.path.join(get_user_logs_dir(user_id), "session_status.json")
+            os.makedirs(os.path.dirname(user_status_file), exist_ok=True)
+            with open(user_status_file, "w", encoding="utf-8") as f:
+                json.dump(current, f, indent=2)
+        except Exception as user_status_err:
+            logger.warning(f"SessionStatus: Failed to save user session status file: {user_status_err}")
+
     try:
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
         with open(STATUS_FILE, "w", encoding="utf-8") as f:
@@ -289,3 +355,15 @@ def update_session_status(
         redis_service.set_session_status(current)
     except Exception as redis_err:
         logger.debug(f"SessionStatus: Failed to cache update in Redis: {redis_err}")
+
+def get_user_session_status(user_id: Union[int, str]) -> dict:
+    """Retrieves session status for a specific user from user's logs directory."""
+    from .database import get_user_logs_dir
+    user_file = os.path.join(get_user_logs_dir(user_id), "session_status.json")
+    if not os.path.exists(user_file) or os.path.getsize(user_file) == 0:
+        return get_session_status()
+    try:
+        with open(user_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return get_session_status()

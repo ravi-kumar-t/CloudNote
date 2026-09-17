@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from typing import Optional, Union
 from collections import deque
 from datetime import datetime
 from playwright.async_api import Page
@@ -9,8 +10,9 @@ from .config import settings
 
 class LectureExtractor:
     """Advanced, passive, read-only extractor of lecture content with deep diagnostics and fallback pipelines."""
-    
-    def __init__(self):
+
+    def __init__(self, user_id: Optional[Union[int, str]] = None):
+        self.user_id = user_id
         self.buffer = deque(maxlen=settings.MAX_BUFFER_LINES)
         self.seen_lines = set()
         
@@ -201,21 +203,32 @@ class LectureExtractor:
         return new_lines_captured
         
     async def save_to_disk(self):
-        """Asynchronously writes the rolling buffer to logs/raw_lecture.txt."""
+        """Asynchronously writes the rolling buffer to raw_lecture.txt (user-partitioned or global fallback)."""
         try:
-            os.makedirs(os.path.dirname(settings.RAW_LECTURE_FILE), exist_ok=True)
-            with open(settings.RAW_LECTURE_FILE, "w", encoding="utf-8") as f:
+            if self.user_id is not None:
+                from .database import get_user_logs_dir
+                raw_file = os.path.join(get_user_logs_dir(self.user_id), "raw_lecture.txt")
+            else:
+                raw_file = settings.RAW_LECTURE_FILE
+
+            os.makedirs(os.path.dirname(raw_file), exist_ok=True)
+            with open(raw_file, "w", encoding="utf-8") as f:
                 for line in self.buffer:
                     f.write(line + "\n")
         except Exception as err:
             logger.error(f"Extractor: Failed to save raw lecture buffer: {err}")
-            
+
     async def save_diagnostics(self, timestamp: str, frames: list, selector_hits: dict, raw_blocks: list, telemetry: dict):
-        """Saves a detailed extraction snapshot to logs/extraction_diagnostics.json."""
+        """Saves a detailed extraction snapshot to extraction_diagnostics.json (user-partitioned or global fallback)."""
         try:
-            diag_file = "logs/extraction_diagnostics.json"
+            if self.user_id is not None:
+                from .database import get_user_logs_dir
+                diag_file = os.path.join(get_user_logs_dir(self.user_id), "extraction_diagnostics.json")
+            else:
+                diag_file = "logs/extraction_diagnostics.json"
+
             os.makedirs(os.path.dirname(diag_file), exist_ok=True)
-            
+
             snapshot = {
                 "timestamp": timestamp,
                 "telemetry": telemetry,
@@ -223,10 +236,10 @@ class LectureExtractor:
                 "selector_hit_counts": {k: v for k, v in selector_hits.items() if v > 0},
                 "raw_extracted_blocks": list(set(raw_blocks))[:200]  # Cap list to prevent massive files
             }
-            
+
             with open(diag_file, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, indent=2)
-                
+
             logger.info(f"Extractor: Saved diagnostic extraction snapshot to {diag_file}")
         except Exception as diag_err:
             logger.error(f"Extractor: Failed to save diagnostic snapshot: {diag_err}")

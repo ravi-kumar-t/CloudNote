@@ -1,9 +1,10 @@
 import asyncio
 import os
+from typing import Optional, Union
 from playwright.async_api import Page, TimeoutError
 from .logger import logger
 from .selectors import CalendarSelectors, MeetingSelectors
-from .config import settings
+from .config import settings, get_screenshot_path, get_user_screenshot_path
 from .scheduler import wait_for_countdown
 
 async def open_calendar(page: Page):
@@ -582,8 +583,8 @@ async def analyze_lecture_state(page: Page) -> str:
         
     return {"state": state, "wait_time": wait_time}
 
-async def join_class_pipeline(page: Page, join_url: str = None):
-    """Orchestrates the entire joining flow using a state-machine loop."""
+async def join_class_pipeline(page: Page, join_url: str = None, user_id: Optional[Union[int, str]] = None):
+    """Orchestrates the entire joining flow using a state-machine loop with optional user context."""
     try:
         # Explicit target page navigation if join_url is provided
         if join_url:
@@ -679,25 +680,28 @@ async def join_class_pipeline(page: Page, join_url: str = None):
             if lecture_state == "FACULTY_NOT_STARTED":
                 logger.info("Lecture is FACULTY_NOT_STARTED. Saving screenshot and terminating pipeline...")
                 from .utils import get_now_ist
-                from .config import get_screenshot_path
                 import time
                 timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
                 ss_filename = f"not_started_{timestamp}.png"
-                ss_path = get_screenshot_path(ss_filename)
-                
+                if user_id is not None:
+                    ss_path = get_user_screenshot_path(user_id, ss_filename)
+                else:
+                    ss_path = get_screenshot_path(ss_filename)
+
                 try:
                     await page.screenshot(path=ss_path, full_page=True)
                     from .session_status import update_session_status
                     update_session_status(
                         status="FACULTY_NOT_STARTED",
                         screenshot=ss_filename,
-                        disconnect_time=None
+                        disconnect_time=None,
+                        user_id=user_id
                     )
                 except Exception as ss_err:
                     logger.error(f"Failed to capture FACULTY_NOT_STARTED screenshot: {ss_err}")
-                
+
                 return "FACULTY_NOT_STARTED"
-                
+
             elif lecture_state == "JOINABLE_ACTIVE":
                 logger.info("Lecture is JOINABLE_ACTIVE. Proceeding to join sequence...")
                 # Handle countdown if present (though unlikely if JOINABLE_ACTIVE, kept for safety)
@@ -705,17 +709,17 @@ async def join_class_pipeline(page: Page, join_url: str = None):
                 await click_join_button(page)
                 await handle_meeting_room(page)
                 return True
-                
+
             elif lecture_state in ["UPCOMING", "NOT_STARTED"]:
                 had_upcoming = True
                 logger.info(f"Lecture is {lecture_state}. Sleeping internally for {wait_time} seconds before re-evaluating...")
                 await asyncio.sleep(wait_time)
                 continue
-                
+
             elif lecture_state == "COMPLETED":
                 logger.info("Lecture is COMPLETED. Gracefully shutting down.")
                 return False
-                
+
             elif lecture_state == "NOT_YET_AVAILABLE":
                 short_retry = 60
                 if settings.DEBUG_SLEEP_OVERRIDE_SECONDS is not None:
@@ -723,16 +727,19 @@ async def join_class_pipeline(page: Page, join_url: str = None):
                 logger.info(f"Lecture is NOT_YET_AVAILABLE. Sleeping for short retry interval ({short_retry}s)...")
                 await asyncio.sleep(short_retry)
                 continue
-                
+
             else:
                 logger.warning(f"Lecture state is {lecture_state}. Aborting join sequence gracefully.")
                 return False
-                
+
         logger.warning(f"Maximum lifecycle iterations ({max_iterations}) reached. Exiting gracefully to prevent infinite loop.")
         return False
-        
+
     except Exception as e:
         logger.error(f"Joining pipeline failed: {str(e)}")
-        failure_path = os.path.join(settings.SCREENSHOTS_DIR, "joining_failure.png")
+        if user_id is not None:
+            failure_path = get_user_screenshot_path(user_id, "joining_failure.png")
+        else:
+            failure_path = os.path.join(settings.SCREENSHOTS_DIR, "joining_failure.png")
         await page.screenshot(path=failure_path)
         raise

@@ -59,3 +59,21 @@ def get_screenshot_path(filename: str) -> str:
     if os.path.exists("/app"):
         return f"/app/screenshots/{filename}"
     return os.path.abspath(os.path.join(settings.SCREENSHOTS_DIR, filename))
+
+def get_user_screenshots_dir(user_id: int | str) -> str:
+    """Returns absolute path to user-scoped screenshots folder (/app/screenshots/{user_id} or local)."""
+    base = "/app/screenshots" if os.path.exists("/app") else os.path.abspath(settings.SCREENSHOTS_DIR)
+    path = os.path.join(base, str(user_id))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def get_user_screenshot_path(user_id: int | str, filename: str) -> str:
+    """Returns absolute path to a user-scoped screenshot file."""
+    return os.path.join(get_user_screenshots_dir(user_id), filename)
+
+def get_user_logs_dir(user_id: int | str) -> str:
+    """Returns absolute path to user-scoped logs folder (/app/logs/{user_id} or local)."""
+    base = "/app/logs" if os.path.exists("/app") else os.path.abspath(settings.LOGS_DIR)
+    path = os.path.join(base, str(user_id))
+    os.makedirs(path, exist_ok=True)
+    return path

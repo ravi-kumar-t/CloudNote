@@ -2,17 +2,19 @@ import os
 import re
 import asyncio
 from datetime import datetime, timedelta, date
+from typing import Optional, Union
 from playwright.async_api import Page
 from .logger import logger
-from .config import settings
+from .config import settings, get_screenshot_path, get_user_screenshot_path
 from .timetable_cache import timetable_cache
 from .timetable_parser import parse_event_card, parse_class_times
 from .selectors import LoginSelectors, CalendarSelectors
 
-async def fetch_timetable_data(page: Page) -> list:
+async def fetch_timetable_data(page: Page, user_id: Optional[Union[int, str]] = None) -> list:
     """
     Scrapes today's (and tomorrow's) classes from the CodeTantra calendar page.
     Returns a unified list of parsed class objects.
+    Supports user-scoped screenshot storage and database persistence when user_id is provided.
     """
     logger.info("Timetable Scraper: Starting timetable data extraction...")
     
@@ -191,10 +193,13 @@ async def fetch_timetable_data(page: Page) -> list:
     if len(classes) == 0:
         logger.info("No classes detected for today. Capturing timetable screenshot...")
         from .utils import get_now_ist
-        from .config import get_screenshot_path
         timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
         ss_filename = f"no_classes_{timestamp}.png"
-        ss_path = get_screenshot_path(ss_filename)
+        if user_id is not None:
+            ss_path = get_user_screenshot_path(user_id, ss_filename)
+        else:
+            ss_path = get_screenshot_path(ss_filename)
+
         try:
             await page.wait_for_timeout(1000)
             await page.screenshot(path=ss_path, full_page=True)
@@ -212,7 +217,76 @@ async def fetch_timetable_data(page: Page) -> list:
 
             verified_at = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
             timetable_cache.set_no_classes_screenshot(ss_filename, verified_at)
+
+            # Persist to user_timetables table if user_id provided
+            if user_id is not None:
+                try:
+                    from .database import save_user_timetable
+                    today_str = date.today().strftime("%Y-%m-%d")
+                    save_user_timetable(
+                        user_id=int(user_id),
+                        date_str=today_str,
+                        classes=[],
+                        no_classes_screenshot=ss_filename,
+                        verified_at=verified_at
+                    )
+                except Exception as db_err:
+                    logger.warning(f"Timetable Scraper: Failed to persist zero-class timetable to DB for user {user_id}: {db_err}")
+
         except Exception as ss_e:
             logger.error(f"Failed to capture timetable screenshot: {ss_e}")
+    else:
+        # Classes detected: persist to user_timetables table if user_id provided
+        if user_id is not None:
+            try:
+                from .database import save_user_timetable
+                from .utils import get_now_ist
+                today_str = date.today().strftime("%Y-%m-%d")
+                verified_at = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
+                save_user_timetable(
+                    user_id=int(user_id),
+                    date_str=today_str,
+                    classes=classes,
+                    no_classes_screenshot=None,
+                    verified_at=verified_at
+                )
+            except Exception as db_err:
+                logger.warning(f"Timetable Scraper: Failed to persist timetable classes to DB for user {user_id}: {db_err}")
 
     return classes
+
+async def fetch_user_timetable_headless(
+    user_id: int,
+    lpu_username: str,
+    lpu_password: str
+) -> list:
+    """
+    Performs an isolated headless timetable synchronization for an explicit user.
+    Creates an independent browser context, logs in with supplied credentials,
+    extracts the calendar timetable, commits it to user_timetables, and cleanly exits.
+    """
+    from playwright.async_api import async_playwright
+    from .login import perform_login
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=settings.HEADLESS,
+            args=["--start-maximized"]
+        )
+        context = await browser.new_context(
+            ignore_https_errors=True,
+            viewport={'width': 1920, 'height': 1080},
+            timezone_id="Asia/Kolkata",
+            locale="en-IN"
+        )
+        page = await context.new_page()
+        page.set_default_timeout(settings.BROWSER_TIMEOUT)
+        page.set_default_navigation_timeout(settings.NAVIGATION_TIMEOUT)
+
+        try:
+            await perform_login(page, username=lpu_username, password=lpu_password, user_id=user_id)
+            classes = await fetch_timetable_data(page, user_id=user_id)
+            return classes
+        finally:
+            await context.close()
+            await browser.close()

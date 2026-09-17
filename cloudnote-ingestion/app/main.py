@@ -1,8 +1,9 @@
 import asyncio
 import os
 import json
+from typing import Optional, Union, Dict, Any
 from playwright.async_api import async_playwright
-from .config import settings, get_screenshot_path
+from .config import settings, get_screenshot_path, get_user_screenshot_path
 from .logger import logger
 from datetime import datetime, timezone, timedelta, date, time
 import sys
@@ -129,34 +130,40 @@ async def check_lecture_completion(page) -> bool:
         
     return False
 
-async def run_ingestion_core(session_state, p):
+async def run_ingestion_core(
+    session_state,
+    p,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    user_id: Optional[Union[int, str]] = None
+):
     extractor = None
     try:
         # Phase 1: Login
         from .login import perform_login
-        await perform_login(session_state["page"])
-        
+        await perform_login(session_state["page"], username=username, password=password, user_id=user_id)
+
         # Phase 2: Joining Workflow
         from .joiner import join_class_pipeline
-        joined = await join_class_pipeline(session_state["page"])
-        
+        joined = await join_class_pipeline(session_state["page"], user_id=user_id)
+
         if joined:
             logger.info("Successfully joined the class session.")
             logger.info("Session is now ACTIVE. Monitoring lecture state...")
-            
+
             from .watchdog import check_session_health, attempt_recovery
-            
-            extractor = LectureExtractor()
+
+            extractor = LectureExtractor(user_id=user_id)
             rejoin_attempts = 0
             start_time = asyncio.get_event_loop().time()
-            
+
             while True:
                 # Active session check every 30 seconds
                 await asyncio.sleep(30)
-                
+
                 # 1. Passive text extraction
                 await extractor.extract_content(session_state["page"])
-                
+
                 # 2. Check for lecture-ended state
                 lecture_ended = await check_lecture_completion(session_state["page"])
                 if lecture_ended:
@@ -175,10 +182,10 @@ async def run_ingestion_core(session_state, p):
                     }
                     logger.info(f"LIFECYCLE_COMPLETED_METRICS: {json.dumps(final_metrics)}")
                     break
-                
+
                 # 3. Verify session health
                 is_healthy = await check_session_health(session_state["page"], session_state["browser"])
-                
+
                 # 4. Emit structured ACTIVE session metrics logs
                 elapsed_seconds = int(asyncio.get_event_loop().time() - start_time)
                 metrics = {
@@ -192,20 +199,23 @@ async def run_ingestion_core(session_state, p):
                     }
                 }
                 logger.info(f"ACTIVE_SESSION_METRICS: {json.dumps(metrics)}")
-                
+
                 if not is_healthy:
                     logger.warning("Session health check failed! Activating watchdog recovery process...")
                     recovery_result = await attempt_recovery(
                         session_state["page"], 
                         session_state["browser"], 
                         session_state["context"], 
-                        p
+                        p,
+                        username=username,
+                        password=password,
+                        user_id=user_id
                     )
                     if recovery_result:
                         session_state["page"], session_state["browser"], session_state["context"] = recovery_result
                         rejoin_attempts += 1
                         logger.info(f"Session successfully recovered by watchdog. Total rejoins: {rejoin_attempts}/{settings.MAX_REJOIN_ATTEMPTS}")
-                        
+
                         if rejoin_attempts > settings.MAX_REJOIN_ATTEMPTS:
                             logger.error("Too many watchdog recovery attempts. Bailing out to prevent infinite rejoin loop.")
                             raise Exception("Runaway watchdog loop protection triggered.")
@@ -216,13 +226,16 @@ async def run_ingestion_core(session_state, p):
                     logger.info("Worker Status: HEALTHY | Session: ACTIVE (In Lecture)")
         else:
             logger.info("No class was joined. Exiting gracefully to end the session.")
-            
+
     except asyncio.CancelledError:
         logger.info("Shutdown signal received. Closing session gracefully...")
     except Exception as e:
         logger.error(f"Execution error: {str(e)}", exc_info=True)
         try:
-            screenshot_path = os.path.join(settings.SCREENSHOTS_DIR, "error_screenshot.png")
+            if user_id is not None:
+                screenshot_path = get_user_screenshot_path(user_id, "error_screenshot.png")
+            else:
+                screenshot_path = os.path.join(settings.SCREENSHOTS_DIR, "error_screenshot.png")
             await session_state["page"].screenshot(path=screenshot_path)
             logger.info(f"Error screenshot saved to {screenshot_path}.")
         except Exception as ss_err:
@@ -234,9 +247,241 @@ async def run_ingestion_core(session_state, p):
             try:
                 raw_content = extractor.get_raw_text()
                 from .gemini_service import summarize_lecture
-                summarize_lecture(raw_content)
+                summarize_lecture(raw_content, username=username, user_id=int(user_id) if user_id else None)
             except Exception as ai_err:
                 logger.warning(f"Failed to execute AI summarization pipeline during shutdown: {ai_err}")
+
+async def process_class(
+    user_id: int,
+    lpu_username: str,
+    lpu_password: str,
+    class_metadata: dict
+) -> dict:
+    """
+    Targeted orchestration function for processing an explicitly specified user's class session.
+    Flow: login -> navigation/join -> extraction -> summary -> persistence.
+    Provisions an independent, isolated BrowserContext and Page for strict session isolation.
+    Persists artifacts authoritatively under user-scoped paths (screenshots/{user_id}/, logs/{user_id}/,
+    user_timetables, and class_attendance_records).
+    Plaintext credentials flow strictly in-memory and are never logged, printed, or returned.
+    """
+    subject = class_metadata.get("subject_code", "Lecture")
+    join_url = class_metadata.get("join_url")
+    subject_name = class_metadata.get("subject_name", "Class Lecture")
+    instructor = class_metadata.get("faculty", "N/A")
+    end_str = class_metadata.get("end_time")
+
+    from datetime import datetime, timedelta
+    from .utils import get_now_ist
+    from .session_status import update_session_status
+    from .extractor import LectureExtractor
+    from .watchdog import check_session_health, attempt_recovery
+    from .gemini_service import summarize_lecture
+
+    try:
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        end_dt = get_now_ist() + timedelta(hours=1)
+
+    logger.info(f"Targeted Ingestion: Starting process_class for user_id={user_id}, subject='{subject}'")
+
+    # Authoritatively set user session status
+    update_session_status(
+        "CONNECTING",
+        subject=subject,
+        title=subject_name,
+        instructor=instructor,
+        user_id=user_id
+    )
+
+    result = {
+        "user_id": user_id,
+        "subject": subject,
+        "status": "FAILED",
+        "details": "",
+        "summary_id": None
+    }
+
+    async with async_playwright() as p:
+        browser, context, page = await create_browser_and_page(p)
+        try:
+            # 1. Capture before_join screenshot in user-scoped partition
+            timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+            before_ss = get_user_screenshot_path(user_id, f"before_join_{timestamp}.png")
+            try:
+                await page.screenshot(path=before_ss, full_page=True)
+                logger.info(f"Targeted Ingestion: Saved before_join screenshot to {before_ss}")
+            except Exception as ss_e:
+                logger.warning(f"Targeted Ingestion: Before-join screenshot failed: {ss_e}")
+
+            # 2. Perform Login with explicit user credentials
+            from .login import perform_login
+            if not settings.DEBUG_MODE:
+                await perform_login(page, username=lpu_username, password=lpu_password, user_id=user_id)
+                logger.info(f"Targeted Ingestion: User {user_id} login complete.")
+            else:
+                logger.info("Targeted Ingestion: DEBUG_MODE active: bypassing real login flow.")
+
+            # 3. Join Class Pipeline
+            from .joiner import join_class_pipeline
+            join_attempts_limit = 3 if not settings.DEBUG_MODE else 1
+            join_failure_cooldown = 180 if not settings.DEBUG_MODE else 1
+            join_success = False
+
+            for attempt in range(1, join_attempts_limit + 1):
+                logger.info(f"Targeted Ingestion: Join attempt {attempt}/{join_attempts_limit} for user {user_id}...")
+                try:
+                    join_success = await join_class_pipeline(page, join_url=join_url, user_id=user_id)
+                    if join_success:
+                        break
+                except Exception as join_err:
+                    logger.error(f"Targeted Ingestion: Join attempt {attempt} failed: {join_err}")
+                    if attempt < join_attempts_limit:
+                        await asyncio.sleep(join_failure_cooldown)
+
+            if join_success == "FACULTY_NOT_STARTED":
+                logger.info(f"Targeted Ingestion: Faculty did not start class for user {user_id}.")
+                result["status"] = "FACULTY_NOT_STARTED"
+                result["details"] = "Faculty did not start the class."
+                return result
+
+            elif not join_success:
+                logger.error(f"Targeted Ingestion: Failed to join class for user {user_id}.")
+                timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                ss_filename = f"failure_{timestamp}.png"
+                ss_path = get_user_screenshot_path(user_id, ss_filename)
+                try:
+                    if page and not page.is_closed():
+                        await page.screenshot(path=ss_path, full_page=True)
+                        update_session_status(
+                            status="FAILED",
+                            screenshot=ss_filename,
+                            disconnect_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+                            subject=subject,
+                            title=subject_name,
+                            instructor=instructor,
+                            user_id=user_id
+                        )
+                except Exception as ss_err:
+                    logger.error(f"Targeted Ingestion: Failed to capture failure screenshot: {ss_err}")
+
+                result["status"] = "FAILED"
+                result["details"] = "Failed to join active lecture"
+                return result
+
+            # 4. Connected State
+            logger.info(f"Targeted Ingestion: Successfully joined active session for user {user_id}.")
+            await asyncio.sleep(5)
+
+            timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+            conn_ss = f"connected_{timestamp}.png"
+            conn_path = get_user_screenshot_path(user_id, conn_ss)
+            try:
+                await page.screenshot(path=conn_path, full_page=True)
+                update_session_status(
+                    status="CONNECTED",
+                    screenshot=conn_ss,
+                    join_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+                    subject=subject,
+                    title=subject_name,
+                    instructor=instructor,
+                    user_id=user_id
+                )
+            except Exception as ss_err:
+                logger.error(f"Targeted Ingestion: Failed to capture connected screenshot: {ss_err}")
+
+            # 5. Extraction & Monitoring Loop
+            extractor = LectureExtractor(user_id=user_id)
+            rejoin_attempts = 0
+
+            while True:
+                await asyncio.sleep(30)
+                await extractor.extract_content(page)
+
+                now_time = get_now_ist()
+                grace_buffer = timedelta(minutes=2)
+                cutoff_time = end_dt + grace_buffer
+
+                if now_time >= cutoff_time:
+                    logger.info(f"Targeted Ingestion: Scheduled lecture end cutoff reached for user {user_id}.")
+                    break
+
+                if await check_lecture_completion(page):
+                    logger.info(f"Targeted Ingestion: Lecture completion detected on-screen for user {user_id}.")
+                    break
+
+                if not await check_session_health(page, browser):
+                    logger.warning(f"Targeted Ingestion: Watchdog health failure for user {user_id}. Recovering...")
+                    recovery = await attempt_recovery(
+                        page, browser, context, p,
+                        join_url=join_url,
+                        username=lpu_username,
+                        password=lpu_password,
+                        user_id=user_id
+                    )
+                    if recovery:
+                        page, browser, context = recovery
+                        rejoin_attempts += 1
+                    else:
+                        logger.error(f"Targeted Ingestion: Watchdog recovery failed for user {user_id}.")
+                        break
+
+            # 6. Disconnect screenshot & attendance persistence
+            timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+            disc_ss = f"disconnect_{timestamp}.png"
+            disc_path = get_user_screenshot_path(user_id, disc_ss)
+            try:
+                if page and not page.is_closed():
+                    await page.screenshot(path=disc_path, full_page=True)
+            except Exception:
+                pass
+
+            update_session_status(
+                status="DISCONNECTED",
+                screenshot=disc_ss,
+                disconnect_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+                subject=subject,
+                title=subject_name,
+                instructor=instructor,
+                user_id=user_id
+            )
+
+            # 7. Summarization & user-scoped DB persistence
+            summary_id = None
+            if extractor.get_buffer_size() > 0:
+                logger.info(f"Targeted Ingestion: Triggering Gemini AI summarization for user {user_id}...")
+                try:
+                    summary_dict = summarize_lecture(
+                        extractor.get_raw_text(),
+                        subject=subject,
+                        username=lpu_username,
+                        user_id=user_id
+                    )
+                    summary_id = summary_dict.get("id")
+                except Exception as sum_err:
+                    logger.error(f"Targeted Ingestion: Summarization failed for user {user_id}: {sum_err}")
+
+            result["status"] = "COMPLETED"
+            result["details"] = "Lecture session ingested and processed successfully."
+            result["summary_id"] = summary_id
+            return result
+
+        except Exception as e:
+            logger.error(f"Targeted Ingestion: Unhandled error processing class for user {user_id}: {e}")
+            result["status"] = "FAILED"
+            result["details"] = str(e)
+            return result
+        finally:
+            try:
+                if page and not page.is_closed():
+                    await page.close()
+                if context:
+                    await context.close()
+                if browser and browser.is_connected():
+                    await browser.close()
+            except Exception as close_err:
+                logger.debug(f"Targeted Ingestion: Cleanup error: {close_err}")
+
 
 async def run_ingestion():
     logger.info("Starting CloudNote Continuous Ingestion Worker...")
