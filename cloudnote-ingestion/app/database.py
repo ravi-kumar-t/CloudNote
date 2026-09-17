@@ -406,6 +406,99 @@ def set_user_portal_credentials(user_id: int, lpu_username: str, plain_password:
         logger.error(f"Database: Failed to set portal credentials for user {user_id}: {e}")
         return False
 
+def get_active_portal_users() -> List[dict]:
+    """
+    Retrieves all active registered users configured with encrypted portal credentials.
+
+    Policy:
+    - IF registered users with encrypted credentials exist in SQLite, process those
+      database users ONLY. Environment credentials are NOT used or merged.
+    - IF ZERO registered portal users exist in SQLite, fall back to LPU_USERNAME / LPU_PASSWORD
+      environment variables (if provided) and auto-provision the legacy ingestion account.
+    """
+    # Note: SQLite concurrency remains a known limitation and is deferred to a later database/concurrency step.
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, username, lpu_username, encrypted_portal_password
+        FROM users
+        WHERE encrypted_portal_password IS NOT NULL AND encrypted_portal_password != ''
+        ORDER BY id ASC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    if rows:
+        users = []
+        for r in rows:
+            users.append({
+                "id": r["id"],
+                "username": r["username"],
+                "lpu_username": r["lpu_username"] or r["username"],
+                "encrypted_portal_password": r["encrypted_portal_password"]
+            })
+        return users
+
+    # Fallback to legacy environment credentials only if ZERO registered portal users exist in DB
+    if settings.LPU_USERNAME and settings.LPU_PASSWORD:
+        legacy_uid = get_or_create_ingestion_user(settings.LPU_USERNAME)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, username, lpu_username, encrypted_portal_password FROM users WHERE id = ?",
+            (legacy_uid,)
+        )
+        legacy_row = cursor.fetchone()
+        conn.close()
+        if legacy_row and legacy_row["encrypted_portal_password"]:
+            return [{
+                "id": legacy_row["id"],
+                "username": legacy_row["username"],
+                "lpu_username": legacy_row["lpu_username"] or legacy_row["username"],
+                "encrypted_portal_password": legacy_row["encrypted_portal_password"]
+            }]
+
+    return []
+
+def update_user_class_status(
+    user_id: int,
+    date_str: str,
+    subject_code: str,
+    timings: Optional[str] = None,
+    new_status: str = "QUEUED"
+) -> bool:
+    """
+    Updates the status of a matching class in user_timetables(user_id, date) to new_status.
+    Returns True if successfully matched and persisted, False otherwise.
+    """
+    # Note: SQLite concurrency remains a known limitation and is deferred to a later database/concurrency step.
+    tt = get_user_timetable(user_id, date_str)
+    if not tt or not tt.get("classes"):
+        return False
+
+    classes = tt["classes"]
+    updated = False
+    for c in classes:
+        match_subject = c.get("subject_code") == subject_code
+        match_timings = True
+        if timings:
+            match_timings = (c.get("timings") == timings or c.get("start_time") == timings)
+        if match_subject and match_timings:
+            c["status"] = new_status
+            updated = True
+            break
+
+    if updated:
+        save_user_timetable(
+            user_id=user_id,
+            date_str=date_str,
+            classes=classes,
+            no_classes_screenshot=tt.get("no_classes_screenshot"),
+            verified_at=tt.get("verified_at")
+        )
+        return True
+    return False
+
 def update_ingestion_status(status: str, details: str = "", subject: str = "", error: str = ""):
     """Updates logs/ingestion_status.json with the current worker state."""
     from datetime import timezone, timedelta
