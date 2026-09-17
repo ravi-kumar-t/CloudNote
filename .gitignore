@@ -5,8 +5,20 @@ chrome-win64/
 __pycache__/
 *.pyc
 
-# Environment
-.env
+# Environment & Secrets
+.env*
+!.env.example
+!.env.production
+credentials.json
+*.pem
+*.key
+*.pfx
+*.crt
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
 
 # Logs
 logs/

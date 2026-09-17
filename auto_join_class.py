@@ -10,6 +10,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from datetime import datetime
 import time
 import re
+import os
 
 print("🚀 Starting browser...")
 
@@ -37,11 +38,17 @@ print("🔐 Waiting for login page...")
 
 time.sleep(2)
 
+username = os.getenv("LPU_USERNAME")
+password = os.getenv("LPU_PASSWORD")
+
+if not username or not password:
+    raise ValueError("Missing credentials: LPU_USERNAME and LPU_PASSWORD environment variables must be set.")
+
 wait.until(EC.presence_of_element_located(
     (By.CSS_SELECTOR, "input[name='i']")
-)).send_keys("12316665")
+)).send_keys(username)
 
-driver.find_element(By.NAME, "p").send_keys("Cool@135")
+driver.find_element(By.NAME, "p").send_keys(password)
 driver.find_element(By.XPATH, "//button").click()
 
 print("✅ Logged in")
