@@ -600,3 +600,52 @@ def release_execution_lock(
     except Exception as e:
         logger.error(f"JobQueue: Error releasing execution lock '{lock_key}': {e}")
         return False
+
+
+def generate_class_idempotency_key(user_id: int, class_metadata: dict[str, Any]) -> str:
+    """
+    Generates a deterministic idempotency key for a scheduled class session.
+    Combines user_id, subject_code, and date/start_time to ensure uniqueness per session.
+    """
+    subject = str(class_metadata.get("subject_code", "class")).strip()
+    start_time = class_metadata.get("start_time")
+    date_val = class_metadata.get("date")
+    timings_val = class_metadata.get("timings")
+
+    if start_time:
+        slot = str(start_time)
+    elif date_val and timings_val:
+        slot = f"{date_val}_{timings_val}"
+    elif timings_val:
+        slot = str(timings_val)
+    elif date_val:
+        slot = str(date_val)
+    else:
+        slot = "active"
+
+    safe_slot = "".join(c if c.isalnum() or c in "-_:" else "_" for c in slot)
+    return f"user:{user_id}:class:{subject}:{safe_slot}"
+
+
+def schedule_class_to_queue(
+    class_metadata: dict[str, Any],
+    user_id: Optional[int] = None,
+    client: Optional[redis.Redis] = None,
+    stream_name: str = DEFAULT_STREAM_NAME,
+) -> tuple[Optional[IngestionJob], bool]:
+    """
+    Helper function for schedulers to enqueue a targeted class ingestion job
+    with a deterministic idempotency key and safe non-secret payload.
+    """
+    if user_id is None:
+        from .database import get_or_create_ingestion_user
+        user_id = get_or_create_ingestion_user(settings.LPU_USERNAME)
+
+    idempotency_key = generate_class_idempotency_key(user_id, class_metadata)
+    return enqueue_job(
+        user_id=user_id,
+        class_metadata=class_metadata,
+        idempotency_key=idempotency_key,
+        client=client,
+        stream_name=stream_name,
+    )
