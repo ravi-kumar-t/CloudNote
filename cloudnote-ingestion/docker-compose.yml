@@ -68,6 +68,7 @@ services:
         condition: service_healthy
 
     init: true
+    shm_size: "1gb"
 
     env_file:
       - .env

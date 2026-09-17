@@ -153,15 +153,11 @@ def get_debug_meeting_fail():
 app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
 
 # Enable CORS for React dashboard access
+cors_origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://80.225.202.140:5173",
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://80.225.202.140:3000",
-        "http://80.225.202.140",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
