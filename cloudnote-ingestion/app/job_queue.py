@@ -6,6 +6,7 @@ Designed for high resilience, deterministic serialization, duplicate protection,
 and strict zero-credential isolation.
 """
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
@@ -370,3 +371,232 @@ def get_pending_jobs(
     except Exception as e:
         logger.error(f"JobQueue: Error retrieving pending jobs on stream '{stream_name}': {e}")
         raise
+
+
+def claim_pending_jobs(
+    consumer_name: str,
+    min_idle_time_ms: int = 300000,
+    count: int = 5,
+    client: Optional[redis.Redis] = None,
+    stream_name: str = DEFAULT_STREAM_NAME,
+    group_name: str = DEFAULT_CONSUMER_GROUP,
+) -> list[IngestionJob]:
+    """
+    Reclaims pending jobs that have been idle for at least min_idle_time_ms
+    using Redis XAUTOCLAIM. Automatically transfers ownership to consumer_name.
+    """
+    if not consumer_name or not isinstance(consumer_name, str):
+        raise ValueError("consumer_name must be a non-empty string.")
+
+    r = client or get_redis_client()
+    ensure_consumer_group(client=r, stream_name=stream_name, group_name=group_name)
+
+    try:
+        res = r.xautoclaim(
+            name=stream_name,
+            groupname=group_name,
+            consumername=consumer_name,
+            min_idle_time=min_idle_time_ms,
+            start_id="0-0",
+            count=count,
+        )
+        claimed_entries = res[1] if len(res) > 1 else []
+    except Exception as e:
+        logger.error(f"JobQueue: Failed to auto-claim pending jobs on '{stream_name}': {e}")
+        return []
+
+    jobs: list[IngestionJob] = []
+    for item in claimed_entries:
+        if isinstance(item, tuple) and len(item) == 2:
+            msg_id, fields = item
+        elif isinstance(item, dict):
+            msg_id = item.get("id") or item.get("message_id")
+            fields = item.get("fields", item)
+        else:
+            continue
+
+        raw_payload = fields.get("payload") if isinstance(fields, dict) else None
+        if not raw_payload:
+            continue
+        try:
+            job = IngestionJob.from_json(raw_payload, stream_message_id=str(msg_id))
+            jobs.append(job)
+        except Exception as err:
+            logger.error(f"JobQueue: Failed to parse reclaimed job payload for {msg_id}: {err}")
+
+    return jobs
+
+
+# Execution Concurrency Lock Helpers
+EXEC_LOCK_PREFIX = "cloudnote:lock:exec:"
+DEFAULT_EXEC_LOCK_TTL_SECONDS = 60  # 60 seconds with heartbeat keep-alive
+DEFAULT_EXEC_LOCK_HEARTBEAT_SECONDS = 15.0  # Renew every 15s while processing
+
+
+def get_execution_lock_key(user_id: int, class_metadata: dict[str, Any]) -> str:
+    """
+    Generates a deterministic Redis key for execution concurrency control (no credentials).
+    Combines user_id, subject_code, and date/timing to prevent cross-class collisions.
+    """
+    subject = str(class_metadata.get("subject_code", "class")).strip()
+    start_time = class_metadata.get("start_time")
+    date_val = class_metadata.get("date")
+    timings_val = class_metadata.get("timings")
+
+    if start_time:
+        slot = str(start_time)
+    elif date_val and timings_val:
+        slot = f"{date_val}_{timings_val}"
+    elif timings_val:
+        slot = str(timings_val)
+    elif date_val:
+        slot = str(date_val)
+    else:
+        slot = "active"
+
+    safe_slot = "".join(c if c.isalnum() or c in "-_:" else "_" for c in slot)
+    return f"{EXEC_LOCK_PREFIX}user:{user_id}:class:{subject}:{safe_slot}"
+
+
+class ExecutionLock:
+    """
+    Distributed execution lock with background heartbeat renewal.
+    Maintains mutual exclusion as long as the worker is alive, and automatically
+    expires shortly after an unexpected worker crash (within ttl_seconds).
+    """
+
+    def __init__(
+        self,
+        lock_key: str,
+        consumer_name: str,
+        client: Optional[redis.Redis] = None,
+        ttl_seconds: int = DEFAULT_EXEC_LOCK_TTL_SECONDS,
+        heartbeat_interval: float = DEFAULT_EXEC_LOCK_HEARTBEAT_SECONDS,
+    ):
+        self.lock_key = lock_key
+        self.consumer_name = consumer_name
+        self.client = client or get_redis_client()
+        self.ttl_seconds = ttl_seconds
+        self.heartbeat_interval = heartbeat_interval
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._acquired = False
+
+    async def acquire(self) -> bool:
+        """Acquires lock in Redis and spawns heartbeat task to keep it alive."""
+        try:
+            acquired = bool(
+                self.client.set(
+                    self.lock_key,
+                    self.consumer_name,
+                    nx=True,
+                    ex=self.ttl_seconds,
+                )
+            )
+            if acquired:
+                self._acquired = True
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            return acquired
+        except Exception as e:
+            logger.error(f"ExecutionLock: Failed to acquire '{self.lock_key}': {e}")
+            return False
+
+    async def _heartbeat_loop(self):
+        """Periodically extends the lock TTL as long as processing is active."""
+        lua_renew = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("expire", KEYS[1], ARGV[2])
+        else
+            return 0
+        end
+        """
+        try:
+            while self._acquired:
+                await asyncio.sleep(self.heartbeat_interval)
+                if not self._acquired:
+                    break
+                renewed = self.client.eval(lua_renew, 1, self.lock_key, self.consumer_name, self.ttl_seconds)
+                if not renewed:
+                    logger.warning(f"ExecutionLock: Lock '{self.lock_key}' ownership lost during renewal.")
+                    break
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"ExecutionLock: Heartbeat error for '{self.lock_key}': {e}")
+
+    async def release(self) -> bool:
+        """Stops heartbeat task and deletes lock key atomically via Lua."""
+        self._acquired = False
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        lua_release = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+        try:
+            res = self.client.eval(lua_release, 1, self.lock_key, self.consumer_name)
+            return bool(res)
+        except Exception as e:
+            logger.error(f"ExecutionLock: Error releasing '{self.lock_key}': {e}")
+            return False
+
+    async def __aenter__(self):
+        acquired = await self.acquire()
+        if not acquired:
+            raise RuntimeError(f"Could not acquire execution lock for '{self.lock_key}'")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.release()
+
+
+def acquire_execution_lock(
+    user_id: int,
+    class_metadata: dict[str, Any],
+    consumer_name: str,
+    ttl_seconds: int = DEFAULT_EXEC_LOCK_TTL_SECONDS,
+    client: Optional[redis.Redis] = None,
+) -> tuple[bool, str]:
+    """
+    Synchronous / simple lock acquisition fallback.
+    Returns (acquired: bool, lock_key: str).
+    """
+    r = client or get_redis_client()
+    lock_key = get_execution_lock_key(user_id, class_metadata)
+    try:
+        acquired = bool(r.set(lock_key, consumer_name, nx=True, ex=ttl_seconds))
+        return acquired, lock_key
+    except Exception as e:
+        logger.error(f"JobQueue: Error acquiring execution lock '{lock_key}': {e}")
+        return False, lock_key
+
+
+def release_execution_lock(
+    lock_key: str,
+    consumer_name: str,
+    client: Optional[redis.Redis] = None,
+) -> bool:
+    """
+    Safely releases the execution lock only if the current consumer still holds it.
+    """
+    r = client or get_redis_client()
+    lua_release = """
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+    else
+        return 0
+    end
+    """
+    try:
+        res = r.eval(lua_release, 1, lock_key, consumer_name)
+        return bool(res)
+    except Exception as e:
+        logger.error(f"JobQueue: Error releasing execution lock '{lock_key}': {e}")
+        return False

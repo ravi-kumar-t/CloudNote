@@ -1,0 +1,356 @@
+"""
+CloudNote Ingestion Worker Consumer
+-----------------------------------
+Redis Streams consumer integration for multi-user class ingestion jobs.
+Retrieves jobs from Redis Streams, resolves user credentials securely in-memory
+from SQLite, enforces concurrency guards, dispatches to process_class,
+and manages job acknowledgment and stale pending entry reclamation.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+import logging
+import os
+import re
+import socket
+from typing import Any, Callable, Optional
+import uuid
+import redis
+
+from .config import settings
+from .database import get_user_portal_credentials
+from .job_queue import (
+    IngestionJob,
+    consume_jobs,
+    acknowledge_job,
+    claim_pending_jobs,
+    acquire_execution_lock,
+    release_execution_lock,
+    get_execution_lock_key,
+    ExecutionLock,
+    get_redis_client,
+    DEFAULT_STREAM_NAME,
+    DEFAULT_CONSUMER_GROUP,
+)
+from .logger import logger
+
+# Sensible default timeout for reclaiming jobs abandoned by dead workers
+DEFAULT_PENDING_JOB_IDLE_TIMEOUT_MS = 300000  # 5 minutes
+
+
+def generate_consumer_name(prefix: str = "worker") -> str:
+    """
+    Generates a globally unique consumer identifier combining hostname, PID, and random UUID.
+    Guarantees distinction between Pods, containers, and local processes.
+    """
+    hostname = socket.gethostname() or "node"
+    pid = os.getpid()
+    uid = uuid.uuid4().hex[:6]
+    return f"{prefix}-{hostname}-{pid}-{uid}"
+
+
+def sanitize_log_message(message: Any) -> str:
+    """
+    Sanitizes string inputs to ensure credentials, tokens, or secrets
+    are never leaked into log sinks or error traces.
+    """
+    msg_str = str(message)
+    # Redact common credential patterns
+    cleaned = re.sub(
+        r"(password|token|secret|jwt|auth_token)\s*[:=]\s*['\"]?[^'\s,}\]]+['\"]?",
+        r"\1='[REDACTED]'",
+        msg_str,
+        flags=re.IGNORECASE,
+    )
+    return cleaned
+
+
+class WorkerConsumer:
+    """
+    Worker consumer instance connected to Redis Streams consumer group.
+    Operates with strict in-memory credential isolation and explicit failure policies.
+    """
+
+    def __init__(
+        self,
+        consumer_name: Optional[str] = None,
+        stream_name: str = DEFAULT_STREAM_NAME,
+        group_name: str = DEFAULT_CONSUMER_GROUP,
+        redis_client: Optional[redis.Redis] = None,
+        idle_timeout_ms: int = DEFAULT_PENDING_JOB_IDLE_TIMEOUT_MS,
+    ):
+        self.consumer_name = consumer_name or generate_consumer_name()
+        self.stream_name = stream_name
+        self.group_name = group_name
+        self.redis_client = redis_client or get_redis_client()
+        self.idle_timeout_ms = idle_timeout_ms
+        self.is_running = False
+        self._stop_event = asyncio.Event()
+        logger.info(
+            f"WorkerConsumer: Initialized instance '{self.consumer_name}' "
+            f"for stream '{self.stream_name}', group '{self.group_name}'."
+        )
+
+    async def process_single_job(
+        self,
+        job: IngestionJob,
+        process_class_fn: Optional[Callable] = None,
+        is_reclaimed: bool = False,
+        lock_ttl_seconds: int = 60,
+        lock_heartbeat_interval: float = 15.0,
+    ) -> bool:
+        """
+        Processes an individual IngestionJob adhering strictly to failure & ACK policies:
+
+        1. Concurrency Lock: Prevents simultaneous execution of the same class for the same user.
+           Uses dynamic heartbeat keep-alive so lock cannot expire while worker is actively running.
+           - If lock is held and is_reclaimed is False: True duplicate in stream -> ACK to drain redundant job.
+           - If lock is held and is_reclaimed is True: Legitimate retry/recovery -> DO NOT ACK! Stays in PEL.
+        2. SQLite Credential Lookup: Resolves user profile and decrypts portal password in memory.
+        3. Terminal Failures (User not found, Missing credentials):
+           Logged safely and ACKed to avoid infinite retries / poisoning.
+        4. Application Outcomes (COMPLETED, FACULTY_NOT_STARTED, FAILED):
+           State is recorded authoritatively in DB/session; job is ACKed.
+        5. Unexpected Worker Exception:
+           DO NOT ACK. Message remains in PEL for stale recovery.
+        """
+        subject = job.class_metadata.get("subject_code", "UnknownClass")
+        user_id = job.user_id
+
+        # 1. Execution Concurrency Guard with Heartbeat Keep-Alive
+        lock_key = get_execution_lock_key(user_id, job.class_metadata)
+        exec_lock = ExecutionLock(
+            lock_key=lock_key,
+            consumer_name=self.consumer_name,
+            client=self.redis_client,
+            ttl_seconds=lock_ttl_seconds,
+            heartbeat_interval=lock_heartbeat_interval,
+        )
+
+        acquired = await exec_lock.acquire()
+        if not acquired:
+            logger.warning(
+                f"WorkerConsumer: Concurrency guard blocked execution for user {user_id}, "
+                f"subject '{subject}'. Another active consumer holds lock '{lock_key}'."
+            )
+            # Differentiate:
+            # - True duplicate: New stream message arrived while active execution is in progress.
+            #   Safe to ACK so redundant duplicate is drained from the queue.
+            # - Legitimate retry / recovery: Message reclaimed from PEL while prior worker might still be alive.
+            #   Must NOT ACK! Retain in PEL for subsequent recovery after lock expires.
+            if not is_reclaimed and job.stream_message_id:
+                try:
+                    acknowledge_job(
+                        message_id=job.stream_message_id,
+                        client=self.redis_client,
+                        stream_name=self.stream_name,
+                        group_name=self.group_name,
+                    )
+                    logger.info(f"WorkerConsumer: ACKed redundant duplicate message {job.stream_message_id}.")
+                except Exception as ack_err:
+                    logger.debug(f"WorkerConsumer: Failed to ACK duplicate message: {ack_err}")
+            return False
+
+        try:
+            # 2. Retrieve user and decrypt credentials strictly in memory
+            user_creds = get_user_portal_credentials(user_id)
+
+            # Policy B: User does not exist in SQLite -> Terminal Failure -> ACK
+            if not user_creds:
+                logger.warning(
+                    f"WorkerConsumer: Terminal failure — user_id {user_id} not found in database. "
+                    f"Acknowledging invalid job {job.stream_message_id} to clear queue."
+                )
+                if job.stream_message_id:
+                    acknowledge_job(
+                        message_id=job.stream_message_id,
+                        client=self.redis_client,
+                        stream_name=self.stream_name,
+                        group_name=self.group_name,
+                    )
+                return False
+
+            portal_pw = user_creds.get("portal_password")
+            lpu_username = user_creds.get("lpu_username") or user_creds.get("username")
+
+            # Policy C: Missing or undecryptable credentials -> Terminal Failure -> ACK
+            if not portal_pw:
+                logger.warning(
+                    f"WorkerConsumer: Terminal failure — missing or invalid portal credentials for user_id {user_id}. "
+                    f"Acknowledging job {job.stream_message_id} to clear queue."
+                )
+                if job.stream_message_id:
+                    acknowledge_job(
+                        message_id=job.stream_message_id,
+                        client=self.redis_client,
+                        stream_name=self.stream_name,
+                        group_name=self.group_name,
+                    )
+                return False
+
+            # 3. Dispatch to targeted process_class
+            logger.info(
+                f"WorkerConsumer: Dispatched job '{job.job_id}' (stream_id: {job.stream_message_id}) "
+                f"for user {user_id}, subject '{subject}' to process_class."
+            )
+
+            if process_class_fn is not None:
+                fn = process_class_fn
+            else:
+                from .main import process_class
+                fn = process_class
+
+            # Execute processing with in-memory credentials only
+            result = await fn(
+                user_id=user_id,
+                lpu_username=lpu_username,
+                lpu_password=portal_pw,
+                class_metadata=job.class_metadata,
+            )
+
+            # Immediate cleanup of plaintext reference in local scope
+            del portal_pw
+
+            # 4. Evaluate outcome and ACK
+            # Policy A & D: Processed execution (COMPLETED, FACULTY_NOT_STARTED, FAILED)
+            status = result.get("status") if isinstance(result, dict) else "COMPLETED"
+            logger.info(
+                f"WorkerConsumer: process_class returned '{status}' for job '{job.job_id}'. "
+                f"Acknowledging stream message {job.stream_message_id}."
+            )
+
+            if job.stream_message_id:
+                acknowledge_job(
+                    message_id=job.stream_message_id,
+                    client=self.redis_client,
+                    stream_name=self.stream_name,
+                    group_name=self.group_name,
+                )
+            return True
+
+        except Exception as exc:
+            # Policy E: Unexpected worker exception -> DO NOT ACK!
+            # Message remains in PEL so it can be reclaimed if worker crashes
+            safe_error = sanitize_log_message(exc)
+            logger.error(
+                f"WorkerConsumer: Unexpected exception processing job '{job.job_id}' "
+                f"for user {user_id}: {safe_error}. Job remains unacknowledged in PEL."
+            )
+            raise exc
+
+        finally:
+            # Always release execution lock (cancels heartbeat task and drops key)
+            await exec_lock.release()
+
+    async def poll_and_process(
+        self,
+        count: int = 1,
+        block_ms: int = 2000,
+        process_class_fn: Optional[Callable] = None,
+        check_stale: bool = True,
+    ) -> int:
+        """
+        Single polling iteration:
+        1. Checks for and reclaims stale pending jobs via XAUTOCLAIM.
+        2. Consumes new jobs from consumer group via XREADGROUP.
+        3. Processes each retrieved job.
+        Returns total jobs processed.
+        """
+        processed_count = 0
+
+        # Step 1: Stale pending job recovery
+        if check_stale:
+            try:
+                stale_jobs = claim_pending_jobs(
+                    consumer_name=self.consumer_name,
+                    min_idle_time_ms=self.idle_timeout_ms,
+                    count=count,
+                    client=self.redis_client,
+                    stream_name=self.stream_name,
+                    group_name=self.group_name,
+                )
+                for stale_job in stale_jobs:
+                    logger.info(
+                        f"WorkerConsumer: Reclaimed stale pending job '{stale_job.job_id}' "
+                        f"(stream_id: {stale_job.stream_message_id}). Processing..."
+                    )
+                    try:
+                        ok = await self.process_single_job(
+                            stale_job,
+                            process_class_fn=process_class_fn,
+                            is_reclaimed=True,
+                        )
+                        if ok:
+                            processed_count += 1
+                    except Exception:
+                        pass
+            except Exception as claim_err:
+                logger.debug(f"WorkerConsumer: Error during stale job recovery: {claim_err}")
+
+        # Step 2: Read new jobs
+        try:
+            new_jobs = consume_jobs(
+                consumer_name=self.consumer_name,
+                count=count,
+                block_ms=block_ms,
+                client=self.redis_client,
+                stream_name=self.stream_name,
+                group_name=self.group_name,
+            )
+        except Exception as read_err:
+            logger.warning(f"WorkerConsumer: Temporary error reading from stream: {read_err}")
+            return processed_count
+
+        for job in new_jobs:
+            try:
+                ok = await self.process_single_job(
+                    job,
+                    process_class_fn=process_class_fn,
+                    is_reclaimed=False,
+                )
+                if ok:
+                    processed_count += 1
+            except Exception:
+                # Exception was already logged in process_single_job; continues loop
+                pass
+
+        return processed_count
+
+    async def run(
+        self,
+        poll_interval: float = 1.0,
+        process_class_fn: Optional[Callable] = None,
+    ):
+        """
+        Starts the worker consumer loop. Runs until stop() is invoked.
+        Resilient against temporary Redis outages with automatic backoff.
+        """
+        self.is_running = True
+        self._stop_event.clear()
+        logger.info(f"WorkerConsumer: Loop started for consumer '{self.consumer_name}'.")
+
+        while self.is_running and not self._stop_event.is_set():
+            try:
+                await self.poll_and_process(
+                    count=1,
+                    block_ms=2000,
+                    process_class_fn=process_class_fn,
+                    check_stale=True,
+                )
+                await asyncio.sleep(poll_interval)
+            except asyncio.CancelledError:
+                logger.info("WorkerConsumer: Received cancellation signal. Shutting down loop.")
+                break
+            except Exception as e:
+                safe_err = sanitize_log_message(e)
+                logger.error(f"WorkerConsumer: Unexpected loop error: {safe_err}. Backing off 3s...")
+                await asyncio.sleep(3.0)
+
+        self.is_running = False
+        logger.info(f"WorkerConsumer: Consumer '{self.consumer_name}' stopped cleanly.")
+
+    def stop(self):
+        """Signals the consumer loop to terminate gracefully."""
+        self.is_running = False
+        self._stop_event.set()
+        logger.info(f"WorkerConsumer: Stop signal sent to '{self.consumer_name}'.")
