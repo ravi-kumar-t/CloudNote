@@ -318,8 +318,9 @@ def test_docker_compose_process_separation():
 
     # Check 3: Worker container configuration
     worker_service = services["worker"]
-    assert worker_service.get("container_name") == "cloudnote-worker", (
-        f"Expected container_name 'cloudnote-worker', got '{worker_service.get('container_name')}'"
+    c_name = worker_service.get("container_name")
+    assert c_name in (None, "cloudnote-worker"), (
+        f"Expected container_name None (scalable) or 'cloudnote-worker', got '{c_name}'"
     )
     worker_cmd = worker_service.get("command")
     assert worker_cmd == ["python", "-m", "app.worker"], (

@@ -78,17 +78,23 @@ class WorkerConsumer:
         group_name: str = DEFAULT_CONSUMER_GROUP,
         redis_client: Optional[redis.Redis] = None,
         idle_timeout_ms: int = DEFAULT_PENDING_JOB_IDLE_TIMEOUT_MS,
+        max_concurrent_jobs: Optional[int] = None,
     ):
         self.consumer_name = consumer_name or generate_consumer_name()
         self.stream_name = stream_name
         self.group_name = group_name
         self.redis_client = redis_client or get_redis_client()
         self.idle_timeout_ms = idle_timeout_ms
+        self.max_concurrent_jobs = max_concurrent_jobs or getattr(settings, "WORKER_MAX_CONCURRENT_JOBS", 1)
         self.is_running = False
         self._stop_event = asyncio.Event()
+        self._active_tasks: set[asyncio.Task] = set()
+        self._semaphore = asyncio.Semaphore(self.max_concurrent_jobs)
+        self._task_exceptions: list[Exception] = []
         logger.info(
             f"WorkerConsumer: Initialized instance '{self.consumer_name}' "
-            f"for stream '{self.stream_name}', group '{self.group_name}'."
+            f"for stream '{self.stream_name}', group '{self.group_name}' "
+            f"(max_concurrent_jobs={self.max_concurrent_jobs})."
         )
 
     async def process_single_job(
@@ -242,20 +248,95 @@ class WorkerConsumer:
             # Always release execution lock (cancels heartbeat task and drops key)
             await exec_lock.release()
 
+    async def _safe_job_task(
+        self,
+        job: IngestionJob,
+        process_class_fn: Optional[Callable] = None,
+        is_reclaimed: bool = False,
+    ) -> bool:
+        """Executes process_single_job under the concurrency semaphore with exception tracking."""
+        async with self._semaphore:
+            try:
+                return await self.process_single_job(
+                    job=job,
+                    process_class_fn=process_class_fn,
+                    is_reclaimed=is_reclaimed,
+                )
+            except asyncio.CancelledError:
+                # Task was cancelled during shutdown; process_single_job's finally block
+                # has already released the execution lock. Message remains in PEL unacknowledged.
+                logger.info(
+                    f"WorkerConsumer: Background task cancelled for job '{job.job_id}'. "
+                    f"Message remains unacknowledged in PEL."
+                )
+                raise
+            except Exception as exc:
+                safe_err = sanitize_log_message(exc)
+                logger.error(
+                    f"WorkerConsumer: Background task error for job '{job.job_id}': {safe_err}"
+                )
+                self._task_exceptions.append(exc)
+                return False
+
+    async def _wait_for_active_tasks(self, timeout: float = 30.0):
+        """
+        Awaits running tasks during graceful shutdown.
+        If any tasks remain running after the timeout:
+        - Cancel remaining tasks so they exit cleanly.
+        - DO NOT emit XACK for cancelled/unfinished jobs.
+        - Rely on process_single_job's finally block to release the execution lock
+          so another worker can reclaim the job via XAUTOCLAIM once idle.
+        - Preserve PEL retention for unacknowledged jobs.
+        """
+        self._active_tasks = {t for t in self._active_tasks if not t.done()}
+        if not self._active_tasks:
+            return
+
+        logger.info(
+            f"WorkerConsumer: Waiting up to {timeout}s for {len(self._active_tasks)} active job(s) to complete..."
+        )
+        done, pending = await asyncio.wait(self._active_tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                f"WorkerConsumer: {len(pending)} active job(s) did not complete within {timeout}s. "
+                f"Aborting jobs without ACK so they remain in PEL for stale recovery."
+            )
+            for t in pending:
+                t.cancel()
+            # Allow cancellation to propagate so finally blocks (which release execution locks) run
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def wait_for_active_tasks(self, timeout: float = 30.0):
+        """Public interface to await in-flight background job tasks during graceful shutdown."""
+        return await self._wait_for_active_tasks(timeout=timeout)
+
     async def poll_and_process(
         self,
         count: int = 1,
         block_ms: int = 2000,
         process_class_fn: Optional[Callable] = None,
         check_stale: bool = True,
+        async_dispatch: Optional[bool] = None,
     ) -> int:
         """
         Single polling iteration:
-        1. Checks for and reclaims stale pending jobs via XAUTOCLAIM.
-        2. Consumes new jobs from consumer group via XREADGROUP.
-        3. Processes each retrieved job.
-        Returns total jobs processed.
+        1. Checks capacity: does not poll if all concurrent slots are occupied.
+        2. Checks for and reclaims stale pending jobs via XAUTOCLAIM.
+        3. Consumes new jobs from consumer group via XREADGROUP.
+        4. Processes each retrieved job (synchronously or dispatched as background task).
+        Returns total jobs processed or dispatched.
         """
+        use_async = (self.max_concurrent_jobs > 1) if async_dispatch is None else async_dispatch
+
+        # Clean up any finished tasks and check capacity
+        self._active_tasks = {t for t in self._active_tasks if not t.done()}
+        available_slots = self.max_concurrent_jobs - len(self._active_tasks)
+        if available_slots <= 0:
+            # All slots are currently occupied; do not accumulate additional jobs into PEL
+            return 0
+
+        # Request at most available_slots to prevent over-accumulating into PEL
+        effective_count = min(count, available_slots)
         processed_count = 0
 
         # Step 1: Stale pending job recovery
@@ -264,7 +345,7 @@ class WorkerConsumer:
                 stale_jobs = claim_pending_jobs(
                     consumer_name=self.consumer_name,
                     min_idle_time_ms=self.idle_timeout_ms,
-                    count=count,
+                    count=effective_count,
                     client=self.redis_client,
                     stream_name=self.stream_name,
                     group_name=self.group_name,
@@ -274,24 +355,39 @@ class WorkerConsumer:
                         f"WorkerConsumer: Reclaimed stale pending job '{stale_job.job_id}' "
                         f"(stream_id: {stale_job.stream_message_id}). Processing..."
                     )
-                    try:
-                        ok = await self.process_single_job(
-                            stale_job,
-                            process_class_fn=process_class_fn,
-                            is_reclaimed=True,
+                    if use_async:
+                        task = asyncio.create_task(
+                            self._safe_job_task(stale_job, process_class_fn=process_class_fn, is_reclaimed=True)
                         )
-                        if ok:
-                            processed_count += 1
-                    except Exception:
-                        pass
+                        self._active_tasks.add(task)
+                        task.add_done_callback(self._active_tasks.discard)
+                        processed_count += 1
+                    else:
+                        try:
+                            ok = await self.process_single_job(
+                                stale_job,
+                                process_class_fn=process_class_fn,
+                                is_reclaimed=True,
+                            )
+                            if ok:
+                                processed_count += 1
+                        except Exception:
+                            pass
             except Exception as claim_err:
                 logger.debug(f"WorkerConsumer: Error during stale job recovery: {claim_err}")
+
+        # Update remaining available slots after stale reclaims
+        if use_async:
+            available_slots = self.max_concurrent_jobs - len(self._active_tasks)
+            if available_slots <= 0:
+                return processed_count
+            effective_count = min(count, available_slots)
 
         # Step 2: Read new jobs
         try:
             new_jobs = consume_jobs(
                 consumer_name=self.consumer_name,
-                count=count,
+                count=effective_count,
                 block_ms=block_ms,
                 client=self.redis_client,
                 stream_name=self.stream_name,
@@ -302,17 +398,25 @@ class WorkerConsumer:
             return processed_count
 
         for job in new_jobs:
-            try:
-                ok = await self.process_single_job(
-                    job,
-                    process_class_fn=process_class_fn,
-                    is_reclaimed=False,
+            if use_async:
+                task = asyncio.create_task(
+                    self._safe_job_task(job, process_class_fn=process_class_fn, is_reclaimed=False)
                 )
-                if ok:
-                    processed_count += 1
-            except Exception:
-                # Exception was already logged in process_single_job; continues loop
-                pass
+                self._active_tasks.add(task)
+                task.add_done_callback(self._active_tasks.discard)
+                processed_count += 1
+            else:
+                try:
+                    ok = await self.process_single_job(
+                        job,
+                        process_class_fn=process_class_fn,
+                        is_reclaimed=False,
+                    )
+                    if ok:
+                        processed_count += 1
+                except Exception:
+                    # Exception was already logged in process_single_job; continues loop
+                    pass
 
         return processed_count
 
@@ -327,12 +431,21 @@ class WorkerConsumer:
         """
         self.is_running = True
         self._stop_event.clear()
-        logger.info(f"WorkerConsumer: Loop started for consumer '{self.consumer_name}'.")
+        logger.info(
+            f"WorkerConsumer: Loop started for consumer '{self.consumer_name}' "
+            f"(max_concurrent_jobs={self.max_concurrent_jobs})."
+        )
 
         while self.is_running and not self._stop_event.is_set():
             try:
+                # Capacity-aware check: If all slots are full, wait without polling Redis
+                available_slots = self.max_concurrent_jobs - len(self._active_tasks)
+                if available_slots <= 0:
+                    await asyncio.sleep(0.2)
+                    continue
+
                 await self.poll_and_process(
-                    count=1,
+                    count=available_slots,
                     block_ms=2000,
                     process_class_fn=process_class_fn,
                     check_stale=True,
@@ -346,6 +459,8 @@ class WorkerConsumer:
                 logger.error(f"WorkerConsumer: Unexpected loop error: {safe_err}. Backing off 3s...")
                 await asyncio.sleep(3.0)
 
+        # Graceful shutdown: wait for active tasks
+        await self._wait_for_active_tasks(timeout=30.0)
         self.is_running = False
         logger.info(f"WorkerConsumer: Consumer '{self.consumer_name}' stopped cleanly.")
 

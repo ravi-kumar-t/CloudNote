@@ -97,7 +97,6 @@ services:
       context: .
       dockerfile: Dockerfile
 
-    container_name: cloudnote-worker
     command: ["python", "-m", "app.worker"]
     restart: unless-stopped
 
