@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # Worker Concurrency Settings
     WORKER_MAX_CONCURRENT_JOBS: int = 1
 
+    # Queue Retry & Capacity Settings
+    QUEUE_MAX_DELIVERY_ATTEMPTS: int = 3
+    QUEUE_STREAM_MAXLEN: int = 10000
+
     # CORS Settings
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173"
 

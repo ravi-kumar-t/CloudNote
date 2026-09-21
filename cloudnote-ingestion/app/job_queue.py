@@ -21,6 +21,7 @@ from .logger import logger
 # Constants & Defaults
 DEFAULT_STREAM_NAME = "cloudnote:jobs:stream"
 DEFAULT_CONSUMER_GROUP = "cloudnote:ingestion:workers"
+DEFAULT_DLQ_STREAM_NAME = "cloudnote:jobs:dlq"
 IDEMPOTENCY_KEY_PREFIX = "cloudnote:job:idempotency:"
 DEFAULT_IDEMPOTENCY_TTL_SECONDS = 86400  # 24 hours
 
@@ -81,9 +82,10 @@ class IngestionJob:
     created_at: str
     idempotency_key: Optional[str] = None
     stream_message_id: Optional[str] = None
+    delivery_count: int = 1
 
     def to_dict(self) -> dict[str, Any]:
-        """Converts job to a serializable dictionary (omits stream_message_id)."""
+        """Converts job to a serializable dictionary (omits stream_message_id and delivery_count)."""
         return {
             "job_id": self.job_id,
             "user_id": self.user_id,
@@ -97,7 +99,12 @@ class IngestionJob:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], stream_message_id: Optional[str] = None) -> "IngestionJob":
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        stream_message_id: Optional[str] = None,
+        delivery_count: int = 1,
+    ) -> "IngestionJob":
         """Reconstitutes an IngestionJob from a dictionary with strict validation."""
         if not isinstance(data, dict):
             raise JobQueueMalformedError("Job payload must be a JSON object dictionary.")
@@ -138,16 +145,22 @@ class IngestionJob:
             created_at=created_at,
             idempotency_key=data.get("idempotency_key"),
             stream_message_id=stream_message_id,
+            delivery_count=delivery_count,
         )
 
     @classmethod
-    def from_json(cls, raw_json: str, stream_message_id: Optional[str] = None) -> "IngestionJob":
+    def from_json(
+        cls,
+        raw_json: str,
+        stream_message_id: Optional[str] = None,
+        delivery_count: int = 1,
+    ) -> "IngestionJob":
         """Parses a JSON string into an IngestionJob."""
         try:
             data = json.loads(raw_json)
         except json.JSONDecodeError as err:
             raise JobQueueMalformedError(f"Failed to decode job JSON payload: {err}") from err
-        return cls.from_dict(data, stream_message_id=stream_message_id)
+        return cls.from_dict(data, stream_message_id=stream_message_id, delivery_count=delivery_count)
 
 
 def get_redis_client(redis_url: Optional[str] = None) -> redis.Redis:
@@ -194,9 +207,11 @@ def enqueue_job(
     client: Optional[redis.Redis] = None,
     stream_name: str = DEFAULT_STREAM_NAME,
     ttl_seconds: int = DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+    maxlen: Optional[int] = None,
+    approximate: bool = True,
 ) -> tuple[Optional[IngestionJob], bool]:
     """
-    Enqueues a targeted ingestion job onto the Redis Stream.
+    Enqueues a targeted ingestion job onto the Redis Stream with bounded capacity defense.
 
     Returns:
         tuple[Optional[IngestionJob], bool]:
@@ -249,9 +264,15 @@ def enqueue_job(
         idempotency_key=idempotency_key.strip() if idempotency_key else None,
     )
 
-    # 4. Stream Enqueue (XADD)
+    # 4. Stream Enqueue (XADD with bounded capacity defense)
     try:
-        stream_message_id = r.xadd(stream_name, {"payload": job.to_json()})
+        eff_maxlen = maxlen if maxlen is not None else getattr(settings, "QUEUE_STREAM_MAXLEN", 10000)
+        stream_message_id = r.xadd(
+            stream_name,
+            {"payload": job.to_json()},
+            maxlen=eff_maxlen,
+            approximate=approximate,
+        )
         job.stream_message_id = stream_message_id
         logger.info(
             f"JobQueue: Successfully enqueued job '{job.job_id}' (stream_id: {stream_message_id}) "
@@ -311,7 +332,8 @@ def consume_jobs(
                 logger.warning(f"JobQueue: Message {msg_id} missing 'payload' field. Skipping.")
                 continue
             try:
-                job = IngestionJob.from_json(raw_payload, stream_message_id=msg_id)
+                raw_msg_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+                job = IngestionJob.from_json(raw_payload, stream_message_id=raw_msg_id, delivery_count=1)
                 jobs.append(job)
             except Exception as err:
                 logger.error(f"JobQueue: Failed to parse job payload for message {msg_id}: {err}")
@@ -326,8 +348,8 @@ def acknowledge_job(
     group_name: str = DEFAULT_CONSUMER_GROUP,
 ) -> bool:
     """
-    Acknowledges receipt and completion of a job using XACK.
-    Removes the message from the Consumer Group Pending Entries List (PEL).
+    Acknowledges processing completion of a job by stream message ID using XACK.
+    Removes the entry from the consumer group Pending Entries List (PEL).
     """
     if not message_id or not isinstance(message_id, str):
         raise ValueError("message_id must be a non-empty string.")
@@ -335,6 +357,10 @@ def acknowledge_job(
     r = client or get_redis_client()
     try:
         ack_count = r.xack(stream_name, group_name, message_id)
+        if ack_count > 0:
+            logger.info(f"JobQueue: Acknowledged message '{message_id}' on stream '{stream_name}'.")
+        else:
+            logger.warning(f"JobQueue: Message '{message_id}' was not in PEL for group '{group_name}'.")
         return ack_count > 0
     except Exception as e:
         logger.error(f"JobQueue: Error acknowledging message '{message_id}' on stream '{stream_name}': {e}")
@@ -383,7 +409,8 @@ def claim_pending_jobs(
 ) -> list[IngestionJob]:
     """
     Reclaims pending jobs that have been idle for at least min_idle_time_ms
-    using Redis XAUTOCLAIM. Automatically transfers ownership to consumer_name.
+    using Redis XAUTOCLAIM. Automatically transfers ownership to consumer_name
+    and populates authoritative delivery_count from Redis PEL.
     """
     if not consumer_name or not isinstance(consumer_name, str):
         raise ValueError("consumer_name must be a non-empty string.")
@@ -418,13 +445,122 @@ def claim_pending_jobs(
         raw_payload = fields.get("payload") if isinstance(fields, dict) else None
         if not raw_payload:
             continue
+
+        raw_msg_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+
+        # Extract authoritative delivery count from Redis PEL
+        delivery_count = 1
         try:
-            job = IngestionJob.from_json(raw_payload, stream_message_id=str(msg_id))
+            pel_info = r.xpending_range(
+                name=stream_name,
+                groupname=group_name,
+                min=raw_msg_id,
+                max=raw_msg_id,
+                count=1,
+            )
+            if pel_info and len(pel_info) > 0:
+                delivery_count = int(pel_info[0].get("times_delivered", 1))
+        except Exception as pel_err:
+            logger.debug(f"JobQueue: Could not inspect PEL delivery count for {raw_msg_id}: {pel_err}")
+
+        try:
+            job = IngestionJob.from_json(raw_payload, stream_message_id=raw_msg_id, delivery_count=delivery_count)
             jobs.append(job)
         except Exception as err:
-            logger.error(f"JobQueue: Failed to parse reclaimed job payload for {msg_id}: {err}")
+            logger.error(f"JobQueue: Failed to parse reclaimed job payload for {raw_msg_id}: {err}")
 
     return jobs
+
+
+def route_to_dead_letter_queue(
+    job: IngestionJob,
+    error_message: str,
+    failed_by_consumer: str,
+    client: Optional[redis.Redis] = None,
+    dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
+    main_stream_name: str = DEFAULT_STREAM_NAME,
+    group_name: str = DEFAULT_CONSUMER_GROUP,
+) -> Optional[str]:
+    """
+    Safely routes a poisoned/unrecoverable job to the Dead-Letter Queue (DLQ) stream.
+    Acknowledges (XACK) the message from the main stream to drain it from the PEL.
+    Strictly sanitizes payload to prevent any credential leakage.
+    Returns the DLQ stream message ID if successful.
+    """
+    r = client or get_redis_client()
+
+    # Security verification: Ensure zero sensitive credentials in payload
+    offending_key = _check_sensitive_keys(job.class_metadata)
+    if offending_key:
+        raise JobQueueSecurityError(
+            f"Security Violation: class_metadata contains forbidden credential field '{offending_key}'."
+        )
+
+    # Sanitize error message to guarantee no secrets appear in logs or DLQ
+    from .worker_consumer import sanitize_log_message
+    safe_error = sanitize_log_message(error_message)[:500]
+
+    dlq_payload = {
+        "job_id": job.job_id,
+        "user_id": str(job.user_id),
+        "class_metadata": json.dumps(job.class_metadata),
+        "delivery_count": str(job.delivery_count),
+        "error_message": safe_error,
+        "failed_by_consumer": failed_by_consumer,
+        "original_stream_id": job.stream_message_id or "",
+        "quarantined_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        dlq_msg_id = r.xadd(dlq_stream_name, dlq_payload)
+        logger.warning(
+            f"JobQueue: Quarantined poison job '{job.job_id}' (delivery_count={job.delivery_count}) "
+            f"to DLQ '{dlq_stream_name}' (DLQ ID: {dlq_msg_id})."
+        )
+    except Exception as dlq_err:
+        logger.error(f"JobQueue: Failed writing to DLQ stream '{dlq_stream_name}': {dlq_err}")
+        return None
+
+    # Acknowledge main stream to clear message from PEL
+    if job.stream_message_id:
+        try:
+            acknowledge_job(
+                message_id=job.stream_message_id,
+                client=r,
+                stream_name=main_stream_name,
+                group_name=group_name,
+            )
+            logger.info(
+                f"JobQueue: Acknowledged quarantined message '{job.stream_message_id}' on '{main_stream_name}'."
+            )
+        except Exception as ack_err:
+            logger.error(f"JobQueue: Failed acknowledging quarantined job from main stream: {ack_err}")
+
+    return dlq_msg_id
+
+
+def get_dead_letter_jobs(
+    client: Optional[redis.Redis] = None,
+    dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
+    count: int = 100,
+) -> list[dict[str, Any]]:
+    """Retrieves recent quarantined entries from the DLQ stream using XRANGE."""
+    r = client or get_redis_client()
+    try:
+        entries = r.xrange(dlq_stream_name, min="-", max="+", count=count)
+        dlq_records = []
+        for msg_id, fields in entries:
+            decoded = {}
+            for k, v in fields.items():
+                key_str = k.decode() if isinstance(k, bytes) else str(k)
+                val_str = v.decode() if isinstance(v, bytes) else str(v)
+                decoded[key_str] = val_str
+            decoded["dlq_message_id"] = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+            dlq_records.append(decoded)
+        return dlq_records
+    except Exception as e:
+        logger.error(f"JobQueue: Error reading DLQ on '{dlq_stream_name}': {e}")
+        return []
 
 
 # Execution Concurrency Lock Helpers

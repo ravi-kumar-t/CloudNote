@@ -31,6 +31,8 @@ from .job_queue import (
     get_redis_client,
     DEFAULT_STREAM_NAME,
     DEFAULT_CONSUMER_GROUP,
+    DEFAULT_DLQ_STREAM_NAME,
+    route_to_dead_letter_queue,
 )
 from .logger import logger
 
@@ -76,6 +78,7 @@ class WorkerConsumer:
         consumer_name: Optional[str] = None,
         stream_name: str = DEFAULT_STREAM_NAME,
         group_name: str = DEFAULT_CONSUMER_GROUP,
+        dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
         redis_client: Optional[redis.Redis] = None,
         idle_timeout_ms: int = DEFAULT_PENDING_JOB_IDLE_TIMEOUT_MS,
         max_concurrent_jobs: Optional[int] = None,
@@ -83,6 +86,7 @@ class WorkerConsumer:
         self.consumer_name = consumer_name or generate_consumer_name()
         self.stream_name = stream_name
         self.group_name = group_name
+        self.dlq_stream_name = dlq_stream_name
         self.redis_client = redis_client or get_redis_client()
         self.idle_timeout_ms = idle_timeout_ms
         self.max_concurrent_jobs = max_concurrent_jobs or getattr(settings, "WORKER_MAX_CONCURRENT_JOBS", 1)
@@ -94,8 +98,69 @@ class WorkerConsumer:
         logger.info(
             f"WorkerConsumer: Initialized instance '{self.consumer_name}' "
             f"for stream '{self.stream_name}', group '{self.group_name}' "
-            f"(max_concurrent_jobs={self.max_concurrent_jobs})."
+            f"(max_concurrent_jobs={self.max_concurrent_jobs}, dlq={self.dlq_stream_name})."
         )
+
+    def _sync_timetable_status(
+        self,
+        user_id: int,
+        class_metadata: dict[str, Any],
+        new_status: str,
+    ) -> bool:
+        """
+        Updates the matching class entry in SQLite user_timetables with the terminal status.
+        Preserves the exact terminal status (COMPLETED, FACULTY_NOT_STARTED, FAILED)
+        without altering the schema or inventing new statuses.
+        """
+        try:
+            from .database import update_user_class_status
+            subject_code = class_metadata.get("subject_code") or class_metadata.get("subject", "")
+            timings = class_metadata.get("timings")
+
+            date_str = class_metadata.get("date")
+            if not date_str and class_metadata.get("start_time"):
+                start_val = str(class_metadata["start_time"])
+                if " " in start_val:
+                    date_str = start_val.split(" ")[0]
+                elif "T" in start_val:
+                    date_str = start_val.split("T")[0]
+            if not date_str:
+                from .utils import get_now_ist
+                date_str = get_now_ist().strftime("%Y-%m-%d")
+
+            updated = update_user_class_status(
+                user_id=user_id,
+                date_str=date_str,
+                subject_code=subject_code,
+                timings=timings,
+                new_status=new_status,
+            )
+            if not updated and timings:
+                # Fallback to match on subject_code without strict timings match
+                updated = update_user_class_status(
+                    user_id=user_id,
+                    date_str=date_str,
+                    subject_code=subject_code,
+                    timings=None,
+                    new_status=new_status,
+                )
+
+            if updated:
+                logger.info(
+                    f"WorkerConsumer: Synchronized timetable status to '{new_status}' "
+                    f"for user {user_id}, subject '{subject_code}', date '{date_str}'."
+                )
+            else:
+                logger.debug(
+                    f"WorkerConsumer: No matching timetable row found to update for user {user_id}, "
+                    f"subject '{subject_code}', date '{date_str}'."
+                )
+            return updated
+        except Exception as e:
+            logger.warning(
+                f"WorkerConsumer: Failed updating user_timetables for user {user_id}: {e}"
+            )
+            return False
 
     async def process_single_job(
         self,
@@ -112,13 +177,19 @@ class WorkerConsumer:
            Uses dynamic heartbeat keep-alive so lock cannot expire while worker is actively running.
            - If lock is held and is_reclaimed is False: True duplicate in stream -> ACK to drain redundant job.
            - If lock is held and is_reclaimed is True: Legitimate retry/recovery -> DO NOT ACK! Stays in PEL.
-        2. SQLite Credential Lookup: Resolves user profile and decrypts portal password in memory.
-        3. Terminal Failures (User not found, Missing credentials):
-           Logged safely and ACKed to avoid infinite retries / poisoning.
-        4. Application Outcomes (COMPLETED, FACULTY_NOT_STARTED, FAILED):
-           State is recorded authoritatively in DB/session; job is ACKed.
-        5. Unexpected Worker Exception:
-           DO NOT ACK. Message remains in PEL for stale recovery.
+        2. Delivery Count & Poison Pill Quarantine (authoritative Redis PEL times_delivered):
+           If job.delivery_count > QUEUE_MAX_DELIVERY_ATTEMPTS:
+           - Quarantines job to DLQ (cloudnote:jobs:dlq).
+           - Updates SQLite timetable status to FAILED.
+           - Emits XACK to clear the message from the main stream PEL.
+           - Does NOT execute process_class again.
+        3. SQLite Credential Lookup: Resolves user profile and decrypts portal password in memory.
+        4. Terminal Failures (User not found, Missing credentials):
+           Logged safely and ACKed to avoid infinite retries / poisoning; updates timetable to FAILED for missing creds.
+        5. Application Outcomes (COMPLETED, FACULTY_NOT_STARTED, FAILED):
+           State is recorded authoritatively in user_timetables and session status; job is ACKed.
+        6. Unexpected Worker Exception:
+           DO NOT ACK. Message remains in PEL for stale recovery until delivery attempts are exhausted.
         """
         subject = job.class_metadata.get("subject_code", "UnknownClass")
         user_id = job.user_id
@@ -158,7 +229,36 @@ class WorkerConsumer:
             return False
 
         try:
-            # 2. Retrieve user and decrypt credentials strictly in memory
+            # 2. Poison Pill Quarantine Check (authoritative delivery count based on Redis PEL)
+            max_delivery_attempts = getattr(settings, "QUEUE_MAX_DELIVERY_ATTEMPTS", 3)
+            if job.delivery_count > max_delivery_attempts:
+                logger.warning(
+                    f"WorkerConsumer: Job '{job.job_id}' exceeded max delivery attempts "
+                    f"({job.delivery_count} > {max_delivery_attempts}). Quarantining to DLQ without executing."
+                )
+                route_to_dead_letter_queue(
+                    job=job,
+                    error_message=f"Exceeded maximum delivery attempts ({job.delivery_count} > {max_delivery_attempts})",
+                    failed_by_consumer=self.consumer_name,
+                    client=self.redis_client,
+                    dlq_stream_name=self.dlq_stream_name,
+                    main_stream_name=self.stream_name,
+                    group_name=self.group_name,
+                )
+                self._sync_timetable_status(user_id, job.class_metadata, new_status="FAILED")
+                try:
+                    from .session_status import update_session_status
+                    update_session_status(
+                        status="FAILED",
+                        subject=subject,
+                        error=f"Quarantined to DLQ after exceeding max delivery attempts ({job.delivery_count} > {max_delivery_attempts}).",
+                        user_id=user_id,
+                    )
+                except Exception:
+                    pass
+                return False
+
+            # 3. Retrieve user and decrypt credentials strictly in memory
             user_creds = get_user_portal_credentials(user_id)
 
             # Policy B: User does not exist in SQLite -> Terminal Failure -> ACK
@@ -185,6 +285,7 @@ class WorkerConsumer:
                     f"WorkerConsumer: Terminal failure — missing or invalid portal credentials for user_id {user_id}. "
                     f"Acknowledging job {job.stream_message_id} to clear queue."
                 )
+                self._sync_timetable_status(user_id, job.class_metadata, new_status="FAILED")
                 if job.stream_message_id:
                     acknowledge_job(
                         message_id=job.stream_message_id,
@@ -194,7 +295,7 @@ class WorkerConsumer:
                     )
                 return False
 
-            # 3. Dispatch to targeted process_class
+            # 4. Dispatch to targeted process_class
             logger.info(
                 f"WorkerConsumer: Dispatched job '{job.job_id}' (stream_id: {job.stream_message_id}) "
                 f"for user {user_id}, subject '{subject}' to process_class."
@@ -217,13 +318,23 @@ class WorkerConsumer:
             # Immediate cleanup of plaintext reference in local scope
             del portal_pw
 
-            # 4. Evaluate outcome and ACK
+            # 5. Evaluate outcome and ACK
             # Policy A & D: Processed execution (COMPLETED, FACULTY_NOT_STARTED, FAILED)
-            status = result.get("status") if isinstance(result, dict) else "COMPLETED"
+            if isinstance(result, dict):
+                status = result.get("status") or "COMPLETED"
+            elif result is True:
+                status = "COMPLETED"
+            elif result is False:
+                status = "FAILED"
+            else:
+                status = "COMPLETED"
+
             logger.info(
                 f"WorkerConsumer: process_class returned '{status}' for job '{job.job_id}'. "
                 f"Acknowledging stream message {job.stream_message_id}."
             )
+
+            self._sync_timetable_status(user_id, job.class_metadata, new_status=status)
 
             if job.stream_message_id:
                 acknowledge_job(
