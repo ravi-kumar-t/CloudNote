@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Optional
+from typing import Optional, Union
 import redis
 from .config import settings
 from .logger import logger
@@ -52,27 +52,33 @@ class RedisService:
 
         return self.redis_client
 
-    def set_session_status(self, status_data: dict) -> bool:
-        """Caches the active session status dictionary in Redis with a 24-hour expiration."""
+    def set_session_status(self, status_data: dict, user_id: Optional[Union[int, str]] = None) -> bool:
+        """Caches active session status dictionary in Redis (user-partitioned if user_id given)."""
         client = self._get_client()
         if not client:
             return False
         try:
-            client.set("cloudnote:session_status", json.dumps(status_data), ex=86400)
+            key = f"cloudnote:user:{user_id}:session_status" if user_id is not None else "cloudnote:session_status"
+            client.set(key, json.dumps(status_data), ex=86400)
             return True
         except Exception as e:
             logger.debug(f"Redis Service: Failed to set session status cache: {e}")
             return False
 
-    def get_session_status(self) -> Optional[dict]:
-        """Retrieves cached session status dictionary from Redis."""
+    def get_session_status(self, user_id: Optional[Union[int, str]] = None) -> Optional[dict]:
+        """Retrieves cached session status dictionary from Redis (user-scoped with global fallback)."""
         client = self._get_client()
         if not client:
             return None
         try:
-            data = client.get("cloudnote:session_status")
-            if data:
-                return json.loads(data)
+            if user_id is not None:
+                data = client.get(f"cloudnote:user:{user_id}:session_status")
+                if data:
+                    return json.loads(data)
+            else:
+                data = client.get("cloudnote:session_status")
+                if data:
+                    return json.loads(data)
         except Exception as e:
             logger.debug(f"Redis Service: Failed to get session status cache: {e}")
         return None

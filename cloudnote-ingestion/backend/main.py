@@ -231,6 +231,15 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
             detail="Authentication failed: Expired or malformed bearer token."
         )
 
+def get_optional_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[dict]:
+    """Dependency injection to optionally authenticate active user without failing on missing credentials."""
+    if not credentials:
+        return None
+    try:
+        return get_current_user(credentials)
+    except HTTPException:
+        return None
+
 # Pydantic schemas
 class UserRegister(BaseModel):
     username: str
@@ -380,31 +389,17 @@ def login_user(credentials: UserLogin):
 # Ingestion status endpoint
 @app.get("/api/ingestion/status")
 def get_ingestion_status(current_user: dict = Depends(get_current_user)):
-    """Retrieves the active ingestion state of the Playwright bot."""
-    status_file = "logs/ingestion_status.json"
-    if not os.path.exists(status_file):
-        return {
-            "status": "idle",
-            "details": "No active scraper processes registered yet.",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-    try:
-        with open(status_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read ingestion status snapshot: {e}"
-        )
+    """Retrieves active ingestion state of the Playwright bot (user-aware)."""
+    from app.database import get_user_ingestion_status
+    return get_user_ingestion_status(current_user["id"])
 
 # Session status endpoint for screenshot validation
 @app.get("/api/session-status")
 def get_session_status_api(current_user: dict = Depends(get_current_user)):
-    """Retrieves the active browser session join status and validation screenshots."""
+    """Retrieves the active browser session join status and validation screenshots for the authenticated user."""
     try:
-        from app.session_status import get_session_status
-        return get_session_status()
+        from app.session_status import get_user_session_status
+        return get_user_session_status(current_user["id"])
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -414,69 +409,53 @@ def get_session_status_api(current_user: dict = Depends(get_current_user)):
 # Persistent class history endpoint for visual dashboard
 @app.get("/api/class-history")
 def get_class_history(current_user: dict = Depends(get_current_user)):
-    """Retrieves persistent class attendance history sorted newest first."""
-    history_file = "logs/class_history.json"
-    if not os.path.exists(history_file):
-        return []
-    if os.path.getsize(history_file) == 0:
-        return []
+    """Retrieves persistent class attendance history for the authenticated user sorted newest first."""
     try:
-        with open(history_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            # Return newest first
-            return list(reversed(data))
-        return []
-    except Exception:
-        return []
+        from app.database import get_user_attendance_records
+        records = get_user_attendance_records(current_user["id"], limit=50)
+        if not records and current_user.get("username") == settings.LPU_USERNAME:
+            history_file = "logs/class_history.json"
+            if os.path.exists(history_file) and os.path.getsize(history_file) > 0:
+                with open(history_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    return list(reversed(data))
+        return records
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load class history: {e}"
+        )
 
 # Get cached timetable endpoint
 @app.get("/api/timetable")
 def get_timetable(current_user: dict = Depends(get_current_user)):
-    """Retrieves today's class schedule details from cache."""
-    # Resolve path absolutely relative to backend file's parent folder
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
-    cache_file = os.path.abspath(os.path.join(backend_dir, "..", "logs", "timetable_cache.json"))
-    
-    print(f"[DEBUG] Timetable Endpoint Request by user: {current_user.get('username')}")
-    print(f"[DEBUG] Resolved cache file path: {cache_file}")
-    
-    if not os.path.exists(cache_file):
-        print(f"[DEBUG] Timetable cache file does NOT exist at: {cache_file}")
-        return []
-        
+    """Retrieves today's class schedule details for the authenticated user from SQLite."""
+    from datetime import timezone, timedelta
+    from app.database import get_user_timetable
+    from app.utils import get_now_ist
+
+    today_str = get_now_ist().strftime("%Y-%m-%d")
+    user_id = current_user["id"]
+
     try:
-        with open(cache_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            
-        from datetime import timezone, timedelta
-        # Compute dates in UTC, IST (UTC+5:30), and server-local
-        IST = timezone(timedelta(hours=5, minutes=30))
-        today_ist = datetime.now(IST).strftime("%Y-%m-%d")
-        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_local = datetime.now().strftime("%Y-%m-%d")
-        
-        cache_date = data.get("date")
-        classes = data.get("classes", [])
-        
-        print(f"[DEBUG] Cache Date: {cache_date}")
-        print(f"[DEBUG] Calculated Dates - IST: {today_ist}, UTC: {today_utc}, Local: {today_local}")
-        print(f"[DEBUG] Total classes loaded from cache file: {len(classes)}")
-        
-        # Resilient match against IST, UTC, or Server-local dates
-        if cache_date not in (today_ist, today_utc, today_local):
-            print(f"[DEBUG] Date mismatch! Stale cache date '{cache_date}' does not match today.")
-            return []
-            
-        print("[DEBUG] Date match successful. Returning cached class array.")
-        return classes
-    except Exception as parse_err:
-        print(f"[DEBUG] Cache file corrupted or failed to parse: {parse_err}. Deleting corrupted cache and returning empty list.")
-        try:
+        user_tt = get_user_timetable(user_id, today_str)
+        if user_tt and "classes" in user_tt:
+            return user_tt["classes"]
+
+        # Legacy fallback only for single-user legacy account
+        if current_user.get("username") == settings.LPU_USERNAME:
+            backend_dir = os.path.dirname(os.path.abspath(__file__))
+            cache_file = os.path.abspath(os.path.join(backend_dir, "..", "logs", "timetable_cache.json"))
             if os.path.exists(cache_file):
-                os.remove(cache_file)
-        except Exception as del_err:
-            print(f"[DEBUG] Failed to delete corrupted cache: {del_err}")
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("date") == today_str:
+                    return data.get("classes", [])
+
+        return []
+    except Exception as err:
+        print(f"[DEBUG] Failed to load timetable for user {user_id}: {err}")
         return []
 
 # Trigger manual timetable sync endpoint
@@ -496,18 +475,15 @@ def sync_timetable(current_user: dict = Depends(get_current_user)):
             detail=f"Failed to queue sync request: {e}"
         )
 
-def resolve_latest_no_classes_screenshot():
+def resolve_latest_no_classes_screenshot(user_id: Optional[int] = None):
     """
     Safely resolves the latest zero-class verification screenshot for today.
-    Returns (abs_file_path, filename, verified_at) or (None, None, None).
+    If user_id is provided, checks SQLite user_timetables first and user's screenshot directory.
+    Returns (abs_file_path, filename_with_user_prefix, verified_at) or (None, None, None).
     Guarantees strict path traversal protection.
     """
     b_dir = os.path.dirname(os.path.abspath(__file__))
-    c_file = os.path.abspath(os.path.join(b_dir, "..", "logs", "timetable_cache.json"))
     s_dir = os.path.abspath(os.path.join(b_dir, "..", "screenshots"))
-
-    target_filename = None
-    target_verified_at = None
 
     from datetime import timezone, timedelta
     IST = timezone(timedelta(hours=5, minutes=30))
@@ -515,7 +491,51 @@ def resolve_latest_no_classes_screenshot():
     today_local = datetime.now().strftime("%Y-%m-%d")
     allowed_dates = {today_ist, today_local}
 
-    # 1. Inspect timetable cache first
+    # 1. User-partitioned resolution from SQLite & screenshots/{user_id}/
+    if user_id is not None:
+        try:
+            from app.database import get_user_timetable
+            tt = get_user_timetable(user_id, today_ist)
+            if tt and tt.get("no_classes_screenshot"):
+                fn = tt["no_classes_screenshot"]
+                s_user_dir = os.path.abspath(os.path.join(s_dir, str(user_id)))
+                cand = os.path.abspath(os.path.join(s_user_dir, fn))
+                if os.path.commonpath([s_user_dir, cand]) == s_user_dir and os.path.isfile(cand):
+                    return cand, f"{user_id}/{fn}", tt.get("verified_at")
+        except Exception as e:
+            print(f"[DEBUG] Error reading user timetable for screenshot: {e}")
+
+        # Scan user's screenshot directory for today's candidates
+        try:
+            s_user_dir = os.path.abspath(os.path.join(s_dir, str(user_id)))
+            if os.path.exists(s_user_dir):
+                candidates = []
+                for entry in os.listdir(s_user_dir):
+                    if entry.startswith("no_classes_") and entry.endswith(".png"):
+                        parts = entry.replace("no_classes_", "").replace(".png", "").split("_")
+                        if parts and parts[0] in allowed_dates:
+                            full_p = os.path.abspath(os.path.join(s_user_dir, entry))
+                            if os.path.commonpath([s_user_dir, full_p]) == s_user_dir and os.path.isfile(full_p):
+                                candidates.append((full_p, entry, os.path.getmtime(full_p)))
+                if candidates:
+                    candidates.sort(key=lambda x: x[2], reverse=True)
+                    full_p, entry, _ = candidates[0]
+                    target_verified_at = None
+                    try:
+                        ts_part = entry.replace("no_classes_", "").replace(".png", "")
+                        ts_dt = datetime.strptime(ts_part, "%Y-%m-%d_%H-%M-%S")
+                        target_verified_at = ts_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+                    return full_p, f"{user_id}/{entry}", target_verified_at
+        except Exception as scan_err:
+            print(f"[DEBUG] Error scanning user screenshot directory: {scan_err}")
+
+    # 2. Legacy fallback for single-user setup
+    c_file = os.path.abspath(os.path.join(b_dir, "..", "logs", "timetable_cache.json"))
+    target_filename = None
+    target_verified_at = None
+
     if os.path.exists(c_file):
         try:
             with open(c_file, "r", encoding="utf-8") as f:
@@ -531,14 +551,12 @@ def resolve_latest_no_classes_screenshot():
         except Exception as e:
             print(f"[DEBUG] Error reading timetable cache for screenshot: {e}")
 
-    # 2. Resilient fallback: Scan screenshots directory for today's files
     if not target_filename:
         try:
             candidates = []
             if os.path.exists(s_dir):
                 for entry in os.listdir(s_dir):
                     if entry.startswith("no_classes_") and entry.endswith(".png"):
-                        # Format: no_classes_YYYY-MM-DD_HH-MM-SS.png
                         parts = entry.replace("no_classes_", "").replace(".png", "").split("_")
                         if parts and parts[0] in allowed_dates:
                             full_p = os.path.abspath(os.path.join(s_dir, entry))
@@ -565,9 +583,10 @@ def resolve_latest_no_classes_screenshot():
     return None, None, None
 
 @app.get("/api/timetable/no-classes-info")
-def get_no_classes_info():
+def get_no_classes_info(current_user: Optional[dict] = Depends(get_optional_current_user)):
     """Returns metadata about today's zero-class timetable verification screenshot."""
-    file_path, filename, verified_at = resolve_latest_no_classes_screenshot()
+    uid = current_user["id"] if current_user else None
+    file_path, filename, verified_at = resolve_latest_no_classes_screenshot(user_id=uid)
     if not file_path:
         return {
             "available": False,
@@ -583,13 +602,14 @@ def get_no_classes_info():
     }
 
 @app.get("/api/timetable/no-classes-screenshot")
-def get_no_classes_screenshot(info: bool = False):
+def get_no_classes_screenshot(info: bool = False, current_user: Optional[dict] = Depends(get_optional_current_user)):
     """
     Returns the latest zero-class timetable verification screenshot for today.
     If info=True, returns JSON metadata. Otherwise returns the image FileResponse.
     Returns HTTP 404 if no verification screenshot exists for today.
     """
-    file_path, filename, verified_at = resolve_latest_no_classes_screenshot()
+    uid = current_user["id"] if current_user else None
+    file_path, filename, verified_at = resolve_latest_no_classes_screenshot(user_id=uid)
     if not file_path:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -609,6 +629,7 @@ def get_no_classes_screenshot(info: bool = False):
         "X-Verified-At": str(verified_at or "")
     }
     return FileResponse(file_path, media_type="image/png", headers=headers)
+
 
 # 3. Retrieve all summaries scoped to the authenticated user
 @app.get("/api/summaries", response_model=List[LectureSummaryResponse])

@@ -10,9 +10,12 @@ from typing import Optional, Union, List, Dict, Any
 DB_PATH = "logs/cloudnote.db"
 
 def get_db_connection():
-    """Establishes connection to the shared SQLite database."""
+    """Establishes connection to the shared SQLite database with concurrency hardening."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -499,26 +502,72 @@ def update_user_class_status(
         return True
     return False
 
-def update_ingestion_status(status: str, details: str = "", subject: str = "", error: str = ""):
-    """Updates logs/ingestion_status.json with the current worker state."""
+def update_ingestion_status(
+    status: str,
+    details: str = "",
+    subject: str = "",
+    error: str = "",
+    user_id: Optional[Union[int, str]] = None
+):
+    """Updates ingestion status with user partition support and global legacy compatibility."""
     from datetime import timezone, timedelta
     IST = timezone(timedelta(hours=5, minutes=30))
-    status_file = "logs/ingestion_status.json"
-    os.makedirs(os.path.dirname(status_file), exist_ok=True)
-    
+
     data = {
         "status": status,
         "details": details,
         "subject": subject,
         "error": error,
+        "user_id": user_id,
         "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     }
-    
+
+    # 1. User partition if user_id given
+    if user_id is not None:
+        try:
+            user_status_file = os.path.join(get_user_logs_dir(user_id), "ingestion_status.json")
+            os.makedirs(os.path.dirname(user_status_file), exist_ok=True)
+            with open(user_status_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to update user ingestion status file: {e}")
+
+    # 2. Global legacy file for backward compatibility
+    status_file = "logs/ingestion_status.json"
+    os.makedirs(os.path.dirname(status_file), exist_ok=True)
     try:
         with open(status_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to update ingestion status file: {e}")
+
+
+def get_user_ingestion_status(user_id: Optional[Union[int, str]] = None) -> dict:
+    """Retrieves ingestion status for a specific user, falling back to global state."""
+    default_status = {
+        "status": "idle",
+        "details": "No active scraper processes registered yet.",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    if user_id is not None:
+        user_status_file = os.path.join(get_user_logs_dir(user_id), "ingestion_status.json")
+        if os.path.exists(user_status_file) and os.path.getsize(user_status_file) > 0:
+            try:
+                with open(user_status_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+
+    status_file = "logs/ingestion_status.json"
+    if os.path.exists(status_file) and os.path.getsize(status_file) > 0:
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    return default_status
+
 
 # Auto-initialize database when module loaded
 init_db()
