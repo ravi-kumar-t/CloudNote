@@ -15,6 +15,7 @@ from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATE
 from app.database import get_db_connection, init_db
 from app.config import settings
 from app.crypto import encrypt_portal_password
+from app.timetable_cache import timetable_cache
 
 # Ensure SQLite schema initialized on server start
 init_db()
@@ -462,12 +463,9 @@ def get_timetable(current_user: dict = Depends(get_current_user)):
 @app.post("/api/timetable/sync")
 def sync_timetable(current_user: dict = Depends(get_current_user)):
     """Triggers an on-demand sync request for the ingestion worker."""
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
-    sync_file = os.path.abspath(os.path.join(backend_dir, "..", "logs", "sync_request.json"))
     try:
-        os.makedirs(os.path.dirname(sync_file), exist_ok=True)
-        with open(sync_file, "w", encoding="utf-8") as f:
-            json.dump({"sync_requested": True}, f)
+        user_id = current_user.get("id") if isinstance(current_user, dict) else None
+        timetable_cache.set_sync_request(True, user_id=user_id)
         return {"status": "sync_requested", "message": "Manual sync successfully queued."}
     except Exception as e:
         raise HTTPException(

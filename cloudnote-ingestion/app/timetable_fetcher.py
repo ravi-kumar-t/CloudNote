@@ -207,10 +207,25 @@ async def fetch_timetable_data(page: Page, user_id: Optional[Union[int, str]] = 
             logger.info(f"Timetable screenshot saved: {ss_path}")
 
             # Clean up prior zero-class screenshot for today to avoid accumulating duplicates
-            old_ss = getattr(timetable_cache, "no_classes_screenshot", None)
+            old_ss = None
+            if user_id is not None:
+                try:
+                    from .database import get_user_timetable
+                    today_str = get_now_ist().strftime("%Y-%m-%d")
+                    existing_tt = get_user_timetable(int(user_id), today_str)
+                    if existing_tt:
+                        old_ss = existing_tt.get("no_classes_screenshot")
+                except Exception:
+                    pass
+            if not old_ss:
+                old_ss = getattr(timetable_cache, "no_classes_screenshot", None)
+
             if old_ss and old_ss != ss_filename:
                 try:
-                    old_path = get_screenshot_path(old_ss)
+                    if user_id is not None:
+                        old_path = get_user_screenshot_path(user_id, old_ss)
+                    else:
+                        old_path = get_screenshot_path(old_ss)
                     if os.path.exists(old_path):
                         os.remove(old_path)
                 except Exception as rm_err:

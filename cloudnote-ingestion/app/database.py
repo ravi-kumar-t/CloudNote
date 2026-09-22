@@ -417,24 +417,53 @@ def record_attendance_session(
     session_duration: Optional[str] = None,
     screenshots: Optional[dict] = None
 ) -> int:
-    """Inserts a persistent attendance history record for a user."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    from datetime import timezone, timedelta
-    IST = timezone(timedelta(hours=5, minutes=30))
-    created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-    screenshots_json = json.dumps(screenshots or {})
+    """
+    Inserts a persistent attendance history record for a user.
+    Includes bounded retry (3 attempts, 0.1s backoff) for transient SQLite 'database is locked'.
+    """
+    import time
+    import sqlite3
+    max_retries = 3
+    backoff = 0.1
 
-    cursor.execute("""
-        INSERT INTO class_attendance_records (
-            user_id, subject, title, instructor, status,
-            joined_at, ended_at, session_duration, screenshots_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, subject, title, instructor, status, joined_at, ended_at, session_duration, screenshots_json, created_at))
-    row_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return row_id
+    for attempt in range(1, max_retries + 1):
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            from datetime import timezone, timedelta
+            IST = timezone(timedelta(hours=5, minutes=30))
+            created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            screenshots_json = json.dumps(screenshots or {})
+
+            cursor.execute("""
+                INSERT INTO class_attendance_records (
+                    user_id, subject, title, instructor, status,
+                    joined_at, ended_at, session_duration, screenshots_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, subject, title, instructor, status, joined_at, ended_at, session_duration, screenshots_json, created_at))
+            row_id = cursor.lastrowid
+            conn.commit()
+            return row_id
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries:
+                logger.warning(
+                    f"Database: SQLite locked in record_attendance_session (attempt {attempt}/{max_retries}), "
+                    f"retrying in {backoff}s..."
+                )
+                time.sleep(backoff)
+                continue
+            logger.error(f"Database: OperationalError in record_attendance_session: {e}")
+            raise e
+        except Exception as e:
+            logger.error(f"Database: Error in record_attendance_session: {e}")
+            raise e
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 def get_user_attendance_records(user_id: int, limit: int = 50) -> list:
     """Retrieves attendance history records for a user, sorted newest first."""

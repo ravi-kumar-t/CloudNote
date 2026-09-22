@@ -218,6 +218,8 @@ class StandaloneSchedulerService:
                     if not active_users:
                         logger.info("Scheduler: No active registered portal users found in database. Waiting 30s...")
                         update_ingestion_status("idle", details="No active registered portal users found. Waiting for registrations.")
+                        if timetable_cache.is_sync_requested():
+                            timetable_cache.set_sync_request(False)
 
                         target_time = asyncio.get_event_loop().time() + 30
                         while asyncio.get_event_loop().time() < target_time and self._is_running:
@@ -261,9 +263,14 @@ class StandaloneSchedulerService:
 
                     # 4. Multi-User Timetable Sync Check
                     sync_requested = timetable_cache.is_sync_requested()
+                    requested_uids = timetable_cache.get_sync_requested_user_ids()
                     users_to_sync = [
                         u for u in active_users
-                        if user_needs_timetable_sync(u["id"], today_str, sync_requested=sync_requested)
+                        if user_needs_timetable_sync(
+                            u["id"],
+                            today_str,
+                            sync_requested=timetable_cache.is_sync_requested(user_id=u["id"])
+                        )
                     ]
 
                     if users_to_sync and not settings.DEBUG_MODE:
@@ -285,8 +292,14 @@ class StandaloneSchedulerService:
                                 await browser.close()
                                 logger.info("Scheduler: Headless browser closed cleanly.")
 
-                        timetable_cache.set_sync_request(False)
                         update_ingestion_status("idle", details="Multi-user timetable sync pass complete.")
+
+                    # Clear evaluated sync requests so stale requests do not cause smart-sleep spin (F-01, F-02)
+                    if requested_uids:
+                        for uid in requested_uids:
+                            timetable_cache.set_sync_request(False, user_id=uid)
+                    elif sync_requested:
+                        timetable_cache.set_sync_request(False)
 
                     # 5. Process timetables across all active users & enqueue active classes
                     now = get_now_ist()

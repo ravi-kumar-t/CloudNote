@@ -1,10 +1,11 @@
 import os
 import json
 from datetime import datetime
+from typing import Optional, Union
 from .logger import logger
 
 CACHE_FILE = "logs/timetable_cache.json"
-SYNC_FILE = "logs/sync_request.json"
+SYNC_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logs", "sync_request.json"))
 
 class TimetableCache:
     _instance = None
@@ -114,26 +115,113 @@ class TimetableCache:
         logger.info("Cache: Marked as stale/void.")
 
     @staticmethod
-    def is_sync_requested() -> bool:
-        """Checks if a user triggered a manual refresh request from the dashboard."""
+    def get_sync_requested_user_ids() -> list:
+        """Returns list of user IDs that have requested a manual sync."""
         if os.path.exists(SYNC_FILE):
             try:
                 with open(SYNC_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    return data.get("sync_requested", False)
+                    uids = data.get("user_ids", [])
+                    if isinstance(uids, list):
+                        result = []
+                        for u in uids:
+                            try:
+                                result.append(int(u))
+                            except (ValueError, TypeError):
+                                pass
+                        return result
+            except Exception:
+                pass
+        return []
+
+    @staticmethod
+    def is_sync_requested(user_id: Optional[Union[int, str]] = None) -> bool:
+        """
+        Checks if a user triggered a manual refresh request from the dashboard.
+        If user_id is provided, checks if that specific user requested a sync.
+        Falls back to global sync_requested for backward compatibility if user_ids key is not present.
+        If user_id is None, checks if any sync request is pending globally.
+        """
+        if os.path.exists(SYNC_FILE):
+            try:
+                with open(SYNC_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if not data.get("sync_requested", False):
+                        return False
+                    if user_id is None:
+                        return True
+                    # user_id is provided
+                    if "user_ids" in data:
+                        uids = data.get("user_ids", [])
+                        if isinstance(uids, list):
+                            try:
+                                return int(user_id) in [int(x) for x in uids]
+                            except (ValueError, TypeError):
+                                return False
+                        return False
+                    # Fallback for backward compatibility if user_ids key absent
+                    return True
             except Exception:
                 pass
         return False
 
     @staticmethod
-    def set_sync_request(requested: bool):
-        """Toggles the cross-process manual sync refresh flag."""
+    def set_sync_request(requested: bool, user_id: Optional[Union[int, str]] = None):
+        """
+        Toggles or updates the cross-process manual sync refresh flag.
+        If user_id is provided, tracks or removes the user from pending sync requests.
+        Preserves backward compatibility with sync_requested boolean.
+        """
         try:
             os.makedirs(os.path.dirname(SYNC_FILE), exist_ok=True)
-            with open(SYNC_FILE, "w", encoding="utf-8") as f:
-                json.dump({"sync_requested": requested}, f)
+            existing_data = {}
+            if os.path.exists(SYNC_FILE):
+                try:
+                    with open(SYNC_FILE, "r", encoding="utf-8") as f:
+                        existing_data = json.load(f)
+                except Exception:
+                    existing_data = {}
+
+            existing_uids = []
+            if isinstance(existing_data.get("user_ids"), list):
+                for x in existing_data["user_ids"]:
+                    try:
+                        uid_int = int(x)
+                        if uid_int not in existing_uids:
+                            existing_uids.append(uid_int)
+                    except (ValueError, TypeError):
+                        pass
+
+            if requested:
+                if user_id is not None:
+                    try:
+                        uid_int = int(user_id)
+                        if uid_int not in existing_uids:
+                            existing_uids.append(uid_int)
+                    except (ValueError, TypeError):
+                        pass
+                with open(SYNC_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"sync_requested": True, "user_ids": existing_uids}, f)
+            else:
+                if user_id is not None:
+                    try:
+                        uid_int = int(user_id)
+                        existing_uids = [x for x in existing_uids if x != uid_int]
+                    except (ValueError, TypeError):
+                        pass
+                    still_requested = len(existing_uids) > 0
+                    with open(SYNC_FILE, "w", encoding="utf-8") as f:
+                        json.dump({"sync_requested": still_requested, "user_ids": existing_uids}, f)
+                else:
+                    with open(SYNC_FILE, "w", encoding="utf-8") as f:
+                        json.dump({"sync_requested": False, "user_ids": []}, f)
         except Exception as e:
             logger.error(f"Cache: Failed to write sync request flag: {e}")
+
+    @staticmethod
+    def request_sync(user_id: Optional[Union[int, str]] = None):
+        """Convenience method to request a manual sync for a user (or globally)."""
+        TimetableCache.set_sync_request(True, user_id=user_id)
 
 # Global instance for thread-safe ease of use
 timetable_cache = TimetableCache()
