@@ -7,7 +7,7 @@ from .config import settings
 
 from typing import Optional, Union, List, Dict, Any
 
-DB_PATH = "logs/cloudnote.db"
+DB_PATH = os.environ.get("DB_PATH", "logs/cloudnote.db")
 
 def get_db_connection():
     """Establishes connection to the shared SQLite database with concurrency hardening."""
@@ -621,7 +621,7 @@ def update_user_class_status(
                     classes=classes,
                     no_classes_screenshot=tt.get("no_classes_screenshot"),
                     verified_at=tt.get("verified_at"),
-                    reconcile=False
+                    reconcile=True
                 )
                 return True
             return False

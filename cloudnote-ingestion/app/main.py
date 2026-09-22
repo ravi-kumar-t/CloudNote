@@ -341,8 +341,47 @@ async def process_class(
 
             if join_success == "FACULTY_NOT_STARTED":
                 logger.info(f"Targeted Ingestion: Faculty did not start class for user {user_id}.")
+                try:
+                    update_session_status(
+                        "FACULTY_NOT_STARTED",
+                        disconnect_time=None,
+                        subject=subject,
+                        title=subject_name,
+                        instructor=instructor,
+                        user_id=user_id
+                    )
+                except Exception as status_err:
+                    logger.error(f"Targeted Ingestion: Failed to update session status to FACULTY_NOT_STARTED: {status_err}")
                 result["status"] = "FACULTY_NOT_STARTED"
                 result["details"] = "Faculty did not start the class."
+                return result
+
+            elif join_success == "COMPLETED":
+                logger.info(f"Targeted Ingestion: Lecture already completed on portal for user {user_id}.")
+                timestamp = get_now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+                ss_filename = f"completed_{timestamp}.png"
+                ss_path = get_user_screenshot_path(user_id, ss_filename)
+                try:
+                    if page and not page.is_closed():
+                        await page.screenshot(path=ss_path, full_page=True)
+                except Exception as ss_err:
+                    logger.debug(f"Targeted Ingestion: Completed screenshot capture failed: {ss_err}")
+
+                try:
+                    update_session_status(
+                        status="DISCONNECTED",
+                        screenshot=ss_filename,
+                        disconnect_time=get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+                        subject=subject,
+                        title=subject_name,
+                        instructor=instructor,
+                        user_id=user_id
+                    )
+                except Exception as status_err:
+                    logger.error(f"Targeted Ingestion: Failed to update session status for completed lecture: {status_err}")
+
+                result["status"] = "COMPLETED"
+                result["details"] = "Lecture already completed on portal."
                 return result
 
             elif not join_success:

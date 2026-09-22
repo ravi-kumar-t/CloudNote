@@ -404,6 +404,7 @@ class StandaloneSchedulerService:
                         break
 
                     # 6. Unified Multi-User Smart Sleep Calculation
+                    active_in_flight = []
                     all_upcoming = []
                     total_classes_today = 0
                     now = get_now_ist()
@@ -416,24 +417,73 @@ class StandaloneSchedulerService:
                         classes = user_tt["classes"]
                         total_classes_today += len(classes)
                         for c in classes:
-                            if c.get("status") in TERMINAL_STATUSES or c.get("status") == "QUEUED":
+                            c_status = c.get("status")
+                            if c_status in TERMINAL_STATUSES:
                                 continue
-                            start_str = c.get("start_time")
-                            if not start_str:
-                                continue
-                            start_dt = None
-                            try:
-                                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-                            except Exception:
-                                try:
-                                    start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00")).replace(tzinfo=None)
-                                except Exception:
-                                    continue
 
-                            if start_dt and start_dt > now:
+                            start_str = c.get("start_time")
+                            end_str = c.get("end_time")
+
+                            start_dt = None
+                            if start_str:
+                                try:
+                                    start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+                                except Exception:
+                                    try:
+                                        start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                                    except Exception:
+                                        start_dt = None
+
+                            end_dt = None
+                            if end_str:
+                                try:
+                                    end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+                                except Exception:
+                                    try:
+                                        end_dt = datetime.fromisoformat(str(end_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                                    except Exception:
+                                        end_dt = None
+
+                            # Check A: Detect active/in-flight classes for today
+                            is_active_in_flight = False
+                            if c_status == "QUEUED":
+                                is_active_in_flight = True
+                            elif start_dt and end_dt and (start_dt <= now <= (end_dt + timedelta(minutes=5))):
+                                is_active_in_flight = True
+
+                            if is_active_in_flight:
+                                active_in_flight.append((uid, c))
+                            elif start_dt and start_dt > now:
                                 all_upcoming.append((start_dt, uid, c))
 
-                    if all_upcoming:
+                    if active_in_flight:
+                        # B & C: Active/in-flight class exists (or unqueued active class).
+                        # Wake within a bounded interval (30s <= 60s) to monitor progress, finalize expired classes, or retry enqueue.
+                        sleep_duration = 30
+                        subject_samples = [c.get("subject_code", "Lecture") for _, c in active_in_flight[:3]]
+                        logger.info(
+                            f"Scheduler: {len(active_in_flight)} active/in-flight class(es) monitored today "
+                            f"({', '.join(subject_samples)}). Sleeping {sleep_duration}s for next check..."
+                        )
+                        update_ingestion_status(
+                            "idle",
+                            details=f"Monitoring {len(active_in_flight)} active/in-flight class(es). Next check in {sleep_duration}s."
+                        )
+
+                        target_time = asyncio.get_event_loop().time() + sleep_duration
+                        while asyncio.get_event_loop().time() < target_time and self._is_running:
+                            try:
+                                from .redis_service import redis_service
+                                redis_service.set_scheduler_heartbeat()
+                            except Exception:
+                                pass
+                            if timetable_cache.is_sync_requested() or get_now_ist().strftime("%Y-%m-%d") != today_str:
+                                logger.info("Scheduler: Sleep interrupted by sync request or date rollover. Waking up!")
+                                break
+                            await asyncio.sleep(min(10, sleep_duration))
+
+                    elif all_upcoming:
+                        # D: Future upcoming classes today
                         all_upcoming.sort(key=lambda x: x[0])
                         earliest_dt, earliest_uid, earliest_class = all_upcoming[0]
                         seconds_remaining = (earliest_dt - now).total_seconds()
@@ -462,12 +512,13 @@ class StandaloneSchedulerService:
                             await asyncio.sleep(10)
 
                     else:
+                        # E: No active/in-flight/future classes: preserve rest behavior but cap at 300s
                         if total_classes_today == 0:
                             logger.info("Scheduler: No classes scheduled for any active users today.")
-                            status_details = "No classes scheduled for today across active users. Resting until tomorrow."
+                            status_details = "No classes scheduled for today across active users. Resting."
                         else:
                             logger.info("Scheduler: All scheduled classes for today have been queued or finalized across all active users.")
-                            status_details = "All classes queued/finalized for today. Resting until tomorrow."
+                            status_details = "All classes queued/finalized for today. Resting."
 
                         current_ist = get_now_ist()
                         if current_ist.time() < time(8, 0):
@@ -476,9 +527,12 @@ class StandaloneSchedulerService:
                         else:
                             target_wake = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
                             target_desc = "tomorrow 8:00 AM"
-                        sleep_duration = max((target_wake - current_ist).total_seconds(), 30)
+                        raw_sleep = max((target_wake - current_ist).total_seconds(), 30)
+                        sleep_duration = min(raw_sleep, 300)
 
-                        logger.info(f"Scheduler: Entering smart sleep until {target_desc} ({sleep_duration:.0f} seconds)...")
+                        logger.info(
+                            f"Scheduler: Resting until {target_desc} (capped at {sleep_duration:.0f}s for new-user discovery)..."
+                        )
                         update_ingestion_status("idle", details=status_details)
 
                         target_time = asyncio.get_event_loop().time() + sleep_duration

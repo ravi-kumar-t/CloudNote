@@ -690,6 +690,10 @@ async def join_class_pipeline(page: Page, join_url: str = None, user_id: Optiona
 
                 try:
                     await page.screenshot(path=ss_path, full_page=True)
+                except Exception as ss_err:
+                    logger.error(f"Failed to capture FACULTY_NOT_STARTED screenshot: {ss_err}")
+
+                try:
                     from .session_status import update_session_status
                     update_session_status(
                         status="FACULTY_NOT_STARTED",
@@ -697,8 +701,8 @@ async def join_class_pipeline(page: Page, join_url: str = None, user_id: Optiona
                         disconnect_time=None,
                         user_id=user_id
                     )
-                except Exception as ss_err:
-                    logger.error(f"Failed to capture FACULTY_NOT_STARTED screenshot: {ss_err}")
+                except Exception as status_err:
+                    logger.error(f"Failed to update session status to FACULTY_NOT_STARTED: {status_err}")
 
                 return "FACULTY_NOT_STARTED"
 
@@ -718,7 +722,7 @@ async def join_class_pipeline(page: Page, join_url: str = None, user_id: Optiona
 
             elif lecture_state == "COMPLETED":
                 logger.info("Lecture is COMPLETED. Gracefully shutting down.")
-                return False
+                return "COMPLETED"
 
             elif lecture_state == "NOT_YET_AVAILABLE":
                 short_retry = 60

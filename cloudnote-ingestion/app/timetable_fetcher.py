@@ -185,7 +185,8 @@ async def fetch_timetable_data(page: Page, user_id: Optional[Union[int, str]] = 
                 logger.warning(f"Timetable Scraper: Failed to process card {i}: {loc_e}")
 
     # Step A: Extract Today's classes
-    today = date.today()
+    from .utils import get_now_ist
+    today = get_now_ist().date()
     await extract_visible_cards(today)
         
     logger.info(f"Timetable Scraper: Extraction complete. Collected {len(classes)} unique classes.")
@@ -222,7 +223,7 @@ async def fetch_timetable_data(page: Page, user_id: Optional[Union[int, str]] = 
             if user_id is not None:
                 try:
                     from .database import save_user_timetable
-                    today_str = date.today().strftime("%Y-%m-%d")
+                    today_str = get_now_ist().strftime("%Y-%m-%d")
                     save_user_timetable(
                         user_id=int(user_id),
                         date_str=today_str,
@@ -241,7 +242,7 @@ async def fetch_timetable_data(page: Page, user_id: Optional[Union[int, str]] = 
             try:
                 from .database import save_user_timetable
                 from .utils import get_now_ist
-                today_str = date.today().strftime("%Y-%m-%d")
+                today_str = get_now_ist().strftime("%Y-%m-%d")
                 verified_at = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
                 save_user_timetable(
                     user_id=int(user_id),

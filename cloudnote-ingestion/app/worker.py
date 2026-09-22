@@ -49,15 +49,39 @@ class StandaloneWorkerService:
         logger.info(f"Starting Dedicated CloudNote Ingestion Worker: {self.consumer_name}")
         logger.info("==========================================================")
 
-        # 1. Connectivity & Group initialization
-        try:
-            r = get_redis_client()
-            if not r.ping():
-                raise ConnectionError("Redis ping failed.")
-            ensure_consumer_group(client=r, stream_name=self.stream_name, group_name=self.group_name)
-            logger.info(f"WorkerService: Verified Redis connection and consumer group '{self.group_name}'.")
-        except Exception as e:
-            logger.error(f"WorkerService: Failed to connect to Redis or initialize group: {e}")
+        # 1. Connectivity & Group initialization with bounded retry
+        max_attempts = 5
+        retry_delay = 1.0
+        connected = False
+        r = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = get_redis_client()
+                if not r.ping():
+                    raise ConnectionError("Redis ping failed.")
+                ensure_consumer_group(client=r, stream_name=self.stream_name, group_name=self.group_name)
+                logger.info(f"WorkerService: Verified Redis connection and consumer group '{self.group_name}'.")
+                connected = True
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if attempt < max_attempts and not self._shutdown_event.is_set():
+                    logger.warning(
+                        f"WorkerService: Redis startup check failed (attempt {attempt}/{max_attempts}): {e}. "
+                        f"Retrying in {retry_delay}s..."
+                    )
+                    try:
+                        await asyncio.sleep(retry_delay)
+                    except asyncio.CancelledError:
+                        raise
+                else:
+                    logger.error(
+                        f"WorkerService: Failed to connect to Redis or initialize group after {max_attempts} attempts: {e}"
+                    )
+
+        if not connected:
             sys.exit(1)
 
         # 2. Register signal handlers
