@@ -460,10 +460,15 @@ class StandaloneSchedulerService:
                         status_details = "All classes queued/finalized for today. Resting until tomorrow."
 
                     current_ist = get_now_ist()
-                    tomorrow_8am = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
-                    sleep_duration = (tomorrow_8am - current_ist).total_seconds()
+                    if current_ist.time() < time(8, 0):
+                        target_wake = datetime.combine(current_ist.date(), time(8, 0))
+                        target_desc = "today 8:00 AM"
+                    else:
+                        target_wake = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
+                        target_desc = "tomorrow 8:00 AM"
+                    sleep_duration = max((target_wake - current_ist).total_seconds(), 30)
 
-                    logger.info(f"Scheduler: Entering smart sleep until tomorrow 8:00 AM ({sleep_duration:.0f} seconds)...")
+                    logger.info(f"Scheduler: Entering smart sleep until {target_desc} ({sleep_duration:.0f} seconds)...")
                     update_ingestion_status("idle", details=status_details)
 
                     target_time = asyncio.get_event_loop().time() + sleep_duration

@@ -247,34 +247,128 @@ def save_summary_to_db(username: str, summary_data: dict, user_id: Optional[int]
         raise db_err
 
 # --- Multi-User Timetable & Session Data Helpers ---
+def _classes_match_identity(c1: dict, c2: dict) -> bool:
+    """
+    Precise class identity matching to distinguish separate occurrences of the same subject.
+    Uses subject_code plus timings/start_time.
+    """
+    s1 = str(c1.get("subject_code") or c1.get("subject") or "").strip()
+    s2 = str(c2.get("subject_code") or c2.get("subject") or "").strip()
+    if not s1 or not s2 or s1 != s2:
+        return False
+
+    # Check timings / start_time
+    t1_timings = c1.get("timings")
+    t1_start = c1.get("start_time")
+    t2_timings = c2.get("timings")
+    t2_start = c2.get("start_time")
+
+    # If both have explicit start_time, match on start_time
+    if t1_start and t2_start:
+        return str(t1_start).strip() == str(t2_start).strip()
+
+    # If both have explicit timings, match on timings
+    if t1_timings and t2_timings:
+        return str(t1_timings).strip() == str(t2_timings).strip()
+
+    # Cross-match if one has timings and the other has start_time
+    if t1_start and t2_timings:
+        if str(t1_start).strip() == str(t2_timings).strip():
+            return True
+    if t1_timings and t2_start:
+        if str(t1_timings).strip() == str(t2_start).strip():
+            return True
+
+    # If neither has timing metadata (fallback), match on subject_code alone
+    if not (t1_start or t1_timings) and not (t2_start or t2_timings):
+        return True
+
+    return False
+
 def save_user_timetable(
     user_id: int,
     date_str: str,
     classes: list,
     no_classes_screenshot: Optional[str] = None,
-    verified_at: Optional[str] = None
+    verified_at: Optional[str] = None,
+    reconcile: bool = True
 ) -> int:
-    """Saves or updates today's timetable for a specific user."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    from datetime import timezone, timedelta
-    IST = timezone(timedelta(hours=5, minutes=30))
-    updated_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-    classes_json = json.dumps(classes)
+    """
+    Saves or updates today's timetable for a specific user with state-reconciliation defense.
+    Preserves in-flight and terminal statuses (COMPLETED, FACULTY_NOT_STARTED, FAILED, MISSED, QUEUED)
+    for existing classes when a fresh portal timetable sync is ingested.
+    Includes bounded retry (3 attempts, 0.1s backoff) for transient SQLite 'database is locked'.
+    """
+    import time
+    max_retries = 3
+    backoff = 0.1
+    terminal_statuses = {"COMPLETED", "FACULTY_NOT_STARTED", "FAILED", "MISSED"}
 
-    cursor.execute("""
-        INSERT INTO user_timetables (user_id, date, classes_json, no_classes_screenshot, verified_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, date) DO UPDATE SET
-            classes_json = excluded.classes_json,
-            no_classes_screenshot = excluded.no_classes_screenshot,
-            verified_at = excluded.verified_at,
-            updated_at = excluded.updated_at
-    """, (user_id, date_str, classes_json, no_classes_screenshot, verified_at, updated_at))
-    row_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return row_id
+    for attempt in range(1, max_retries + 1):
+        try:
+            if reconcile:
+                existing_tt = get_user_timetable(user_id, date_str)
+                existing_classes = (existing_tt.get("classes") or []) if existing_tt else []
+
+                if existing_classes and classes:
+                    reconciled = []
+                    for incoming in classes:
+                        c_dict = dict(incoming)
+                        matched_existing = None
+                        for ec in existing_classes:
+                            if _classes_match_identity(ec, c_dict):
+                                matched_existing = ec
+                                break
+
+                        if matched_existing:
+                            existing_status = matched_existing.get("status")
+                            incoming_status = c_dict.get("status") or "UPCOMING"
+                            if existing_status in terminal_statuses:
+                                c_dict["status"] = existing_status
+                            elif existing_status == "QUEUED":
+                                if incoming_status not in terminal_statuses:
+                                    c_dict["status"] = "QUEUED"
+                        reconciled.append(c_dict)
+                    classes_to_save = reconciled
+                else:
+                    classes_to_save = classes
+            else:
+                classes_to_save = classes
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            from datetime import timezone, timedelta
+            IST = timezone(timedelta(hours=5, minutes=30))
+            updated_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            classes_json = json.dumps(classes_to_save)
+
+            cursor.execute("""
+                INSERT INTO user_timetables (user_id, date, classes_json, no_classes_screenshot, verified_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    classes_json = excluded.classes_json,
+                    no_classes_screenshot = excluded.no_classes_screenshot,
+                    verified_at = excluded.verified_at,
+                    updated_at = excluded.updated_at
+            """, (user_id, date_str, classes_json, no_classes_screenshot, verified_at, updated_at))
+            row_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return row_id
+
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries:
+                logger.warning(
+                    f"Database: SQLite locked in save_user_timetable (attempt {attempt}/{max_retries}), "
+                    f"retrying in {backoff}s..."
+                )
+                time.sleep(backoff)
+                continue
+            logger.error(f"Database: OperationalError in save_user_timetable: {e}")
+            raise e
+        except Exception as e:
+            logger.error(f"Database: Error in save_user_timetable: {e}")
+            raise e
 
 def get_user_timetable(user_id: int, date_str: str) -> Optional[dict]:
     """Retrieves timetable for a specific user and date."""
@@ -513,7 +607,8 @@ def update_user_class_status(
                     date_str=date_str,
                     classes=classes,
                     no_classes_screenshot=tt.get("no_classes_screenshot"),
-                    verified_at=tt.get("verified_at")
+                    verified_at=tt.get("verified_at"),
+                    reconcile=False
                 )
                 return True
             return False

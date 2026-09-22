@@ -290,6 +290,90 @@ def enqueue_job(
         raise
 
 
+def quarantine_malformed_message(
+    message_id: str,
+    error_message: str,
+    consumer_name: str,
+    raw_payload: Optional[str] = None,
+    client: Optional[redis.Redis] = None,
+    dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
+    main_stream_name: str = DEFAULT_STREAM_NAME,
+    stream_name: Optional[str] = None,
+    group_name: str = DEFAULT_CONSUMER_GROUP,
+) -> Optional[str]:
+    """
+    Safely quarantines a malformed, unparseable, or security-rejected stream message to the DLQ.
+    Guarantees no credentials/secrets are placed into the DLQ.
+    Acknowledges (XACK) the message from the main stream ONLY after the DLQ write succeeds.
+    If the DLQ write fails, does NOT XACK so the message remains in the main stream PEL.
+    Returns the DLQ stream message ID if successful, else None.
+    """
+    r = client or get_redis_client()
+    target_stream = stream_name or main_stream_name
+
+    from .worker_consumer import sanitize_log_message
+    safe_error = sanitize_log_message(error_message)[:500]
+
+    # Clean payload representation ensuring zero sensitive credentials
+    safe_metadata = "{}"
+    if raw_payload:
+        try:
+            parsed = json.loads(raw_payload)
+            if isinstance(parsed, dict):
+                offending_key = _check_sensitive_keys(parsed)
+                if offending_key:
+                    safe_metadata = json.dumps({"security_violation": f"Forbidden key '{offending_key}' redacted"})
+                else:
+                    meta = parsed.get("class_metadata")
+                    if isinstance(meta, dict):
+                        safe_metadata = json.dumps(meta)
+                    else:
+                        safe_metadata = json.dumps({"raw_keys": list(parsed.keys())})
+            else:
+                safe_metadata = json.dumps({"non_dict_payload": True})
+        except Exception:
+            safe_metadata = json.dumps({"unparseable_json": True})
+
+    dlq_payload = {
+        "job_id": f"malformed-{message_id}",
+        "user_id": "0",
+        "class_metadata": safe_metadata,
+        "delivery_count": "1",
+        "error_message": safe_error,
+        "failed_by_consumer": consumer_name,
+        "original_stream_id": str(message_id),
+        "quarantined_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        dlq_msg_id = r.xadd(dlq_stream_name, dlq_payload)
+        logger.warning(
+            f"JobQueue: Quarantined malformed message '{message_id}' to DLQ '{dlq_stream_name}' "
+            f"(DLQ ID: {dlq_msg_id}): {safe_error}"
+        )
+    except Exception as dlq_err:
+        logger.error(
+            f"JobQueue: Failed writing malformed message '{message_id}' to DLQ: {dlq_err}. Leaving in PEL."
+        )
+        return None
+
+    # CRITICAL INVARIANT: Acknowledge main stream ONLY after DLQ write succeeds
+    try:
+        acknowledge_job(
+            message_id=str(message_id),
+            client=r,
+            stream_name=target_stream,
+            group_name=group_name,
+        )
+        logger.info(
+            f"JobQueue: Acknowledged quarantined malformed message '{message_id}' on '{target_stream}'."
+        )
+    except Exception as ack_err:
+        logger.error(f"JobQueue: Failed acknowledging malformed message '{message_id}' from main stream: {ack_err}")
+
+    return dlq_msg_id
+
+
 def consume_jobs(
     consumer_name: str,
     count: int = 1,
@@ -297,6 +381,7 @@ def consume_jobs(
     client: Optional[redis.Redis] = None,
     stream_name: str = DEFAULT_STREAM_NAME,
     group_name: str = DEFAULT_CONSUMER_GROUP,
+    dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
 ) -> list[IngestionJob]:
     """
     Reads new unacknowledged jobs from the consumer group stream using XREADGROUP.
@@ -327,16 +412,37 @@ def consume_jobs(
 
     for stream, message_list in entries:
         for msg_id, fields in message_list:
-            raw_payload = fields.get("payload")
+            raw_msg_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+            raw_payload = fields.get("payload") if isinstance(fields, dict) else None
             if not raw_payload:
-                logger.warning(f"JobQueue: Message {msg_id} missing 'payload' field. Skipping.")
+                logger.warning(f"JobQueue: Message {raw_msg_id} missing 'payload' field. Quarantining to DLQ.")
+                quarantine_malformed_message(
+                    message_id=raw_msg_id,
+                    error_message="Message missing required 'payload' field",
+                    consumer_name=consumer_name,
+                    raw_payload=None,
+                    client=r,
+                    stream_name=stream_name,
+                    group_name=group_name,
+                    dlq_stream_name=dlq_stream_name,
+                )
                 continue
             try:
-                raw_msg_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
                 job = IngestionJob.from_json(raw_payload, stream_message_id=raw_msg_id, delivery_count=1)
                 jobs.append(job)
             except Exception as err:
-                logger.error(f"JobQueue: Failed to parse job payload for message {msg_id}: {err}")
+                safe_err = str(err)
+                logger.error(f"JobQueue: Failed to parse job payload for message {raw_msg_id}: {safe_err}. Quarantining to DLQ.")
+                quarantine_malformed_message(
+                    message_id=raw_msg_id,
+                    error_message=f"Deserialization failure: {safe_err}",
+                    consumer_name=consumer_name,
+                    raw_payload=raw_payload,
+                    client=r,
+                    stream_name=stream_name,
+                    group_name=group_name,
+                    dlq_stream_name=dlq_stream_name,
+                )
 
     return jobs
 
@@ -406,6 +512,7 @@ def claim_pending_jobs(
     client: Optional[redis.Redis] = None,
     stream_name: str = DEFAULT_STREAM_NAME,
     group_name: str = DEFAULT_CONSUMER_GROUP,
+    dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
 ) -> list[IngestionJob]:
     """
     Reclaims pending jobs that have been idle for at least min_idle_time_ms
@@ -442,11 +549,21 @@ def claim_pending_jobs(
         else:
             continue
 
+        raw_msg_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
         raw_payload = fields.get("payload") if isinstance(fields, dict) else None
         if not raw_payload:
+            logger.warning(f"JobQueue: Reclaimed message {raw_msg_id} missing 'payload'. Quarantining to DLQ.")
+            quarantine_malformed_message(
+                message_id=raw_msg_id,
+                error_message="Reclaimed message missing required 'payload' field",
+                consumer_name=consumer_name,
+                raw_payload=None,
+                client=r,
+                stream_name=stream_name,
+                group_name=group_name,
+                dlq_stream_name=dlq_stream_name,
+            )
             continue
-
-        raw_msg_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 
         # Extract authoritative delivery count from Redis PEL
         delivery_count = 1
@@ -467,7 +584,18 @@ def claim_pending_jobs(
             job = IngestionJob.from_json(raw_payload, stream_message_id=raw_msg_id, delivery_count=delivery_count)
             jobs.append(job)
         except Exception as err:
-            logger.error(f"JobQueue: Failed to parse reclaimed job payload for {raw_msg_id}: {err}")
+            safe_err = str(err)
+            logger.error(f"JobQueue: Failed to parse reclaimed job payload for {raw_msg_id}: {safe_err}. Quarantining to DLQ.")
+            quarantine_malformed_message(
+                message_id=raw_msg_id,
+                error_message=f"Reclaimed message deserialization failure: {safe_err}",
+                consumer_name=consumer_name,
+                raw_payload=raw_payload,
+                client=r,
+                stream_name=stream_name,
+                group_name=group_name,
+                dlq_stream_name=dlq_stream_name,
+            )
 
     return jobs
 
