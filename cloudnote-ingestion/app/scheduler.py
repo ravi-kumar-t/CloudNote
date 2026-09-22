@@ -168,12 +168,16 @@ class StandaloneSchedulerService:
         self._is_running = True
         self._shutdown_event = asyncio.Event()
 
+    def stop(self):
+        """Signals the scheduler loop to stop."""
+        self._is_running = False
+        self._shutdown_event.set()
+
     def handle_signal(self, sig, frame=None):
         """Signal handler for graceful scheduler termination."""
         sig_name = signal.Signals(sig).name if hasattr(signal, "Signals") else str(sig)
         logger.info(f"SchedulerService: Received signal {sig_name}. Stopping scheduler...")
-        self._is_running = False
-        self._shutdown_event.set()
+        self.stop()
 
     async def run(self):
         """Main autonomous multi-user scheduler loop."""
@@ -198,294 +202,317 @@ class StandaloneSchedulerService:
 
         try:
             while self._is_running:
-                # 1. Resilient scheduler heartbeat update (Sidecar Integration)
                 try:
-                    from .redis_service import redis_service
-                    redis_service.set_scheduler_heartbeat()
-                except Exception:
-                    pass
+                    # 1. Resilient scheduler heartbeat update (Sidecar Integration)
+                    try:
+                        from .redis_service import redis_service
+                        redis_service.set_scheduler_heartbeat()
+                    except Exception:
+                        pass
 
-                today_str = get_now_ist().strftime("%Y-%m-%d")
+                    today_str = get_now_ist().strftime("%Y-%m-%d")
 
-                # 2. Discover active registered portal users
-                # Note: SQLite concurrency remains a known limitation and is deferred to a later database/concurrency step.
-                active_users = get_active_portal_users()
-                if not active_users:
-                    logger.info("Scheduler: No active registered portal users found in database. Waiting 30s...")
-                    update_ingestion_status("idle", details="No active registered portal users found. Waiting for registrations.")
+                    # 2. Discover active registered portal users
+                    # Note: SQLite concurrency remains a known limitation and is deferred to a later database/concurrency step.
+                    active_users = get_active_portal_users()
+                    if not active_users:
+                        logger.info("Scheduler: No active registered portal users found in database. Waiting 30s...")
+                        update_ingestion_status("idle", details="No active registered portal users found. Waiting for registrations.")
 
-                    target_time = asyncio.get_event_loop().time() + 30
-                    while asyncio.get_event_loop().time() < target_time and self._is_running:
-                        try:
-                            from .redis_service import redis_service
-                            redis_service.set_scheduler_heartbeat()
-                        except Exception:
-                            pass
-                        if timetable_cache.is_sync_requested():
-                            break
-                        await asyncio.sleep(5)
-                    continue
-
-                logger.info(f"Scheduler: Discovered {len(active_users)} active portal user(s).")
-
-                # 3. Handle DEBUG_MODE simulation if active
-                if settings.DEBUG_MODE:
-                    logger.info("=== DEBUG_MODE SIMULATION ACTIVE ===")
-                    now = get_now_ist()
-                    if settings.DEBUG_SIMULATION_MODE.upper() == "FAILURE":
-                        join_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting-fail"
-                        subject = "DEBUG_FAIL"
-                    else:
-                        join_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting"
-                        subject = "DEBUG_SUCCESS"
-
-                    active_class = {
-                        "subject_code": subject,
-                        "subject_name": "Debug Automation Class",
-                        "faculty": "Dr. Playwright Tester",
-                        "timings": "10:00 AM - 11:00 AM",
-                        "start_time": (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
-                        "end_time": (now + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
-                        "join_url": join_url,
-                        "status": "UPCOMING"
-                    }
-                    for u in active_users:
-                        user_tt = get_user_timetable(u["id"], today_str)
-                        if not user_tt:
-                            save_user_timetable(u["id"], today_str, [active_class], verified_at=now.strftime("%Y-%m-%d %H:%M:%S"))
-
-                # 4. Multi-User Timetable Sync Check
-                sync_requested = timetable_cache.is_sync_requested()
-                users_to_sync = [
-                    u for u in active_users
-                    if user_needs_timetable_sync(u["id"], today_str, sync_requested=sync_requested)
-                ]
-
-                if users_to_sync and not settings.DEBUG_MODE:
-                    logger.info(f"Scheduler: {len(users_to_sync)} user(s) require timetable sync. Launching browser...")
-                    update_ingestion_status(
-                        "processing",
-                        details=f"Performing headless timetable sync for {len(users_to_sync)} user(s)"
-                    )
-
-                    async with async_playwright() as p:
-                        browser = await p.chromium.launch(
-                            headless=settings.HEADLESS,
-                            args=["--start-maximized"]
-                        )
-                        try:
-                            for user in users_to_sync:
-                                await sync_user_timetable_in_context(browser, user, today_str)
-                        finally:
-                            await browser.close()
-                            logger.info("Scheduler: Headless browser closed cleanly.")
-
-                    timetable_cache.set_sync_request(False)
-                    update_ingestion_status("idle", details="Multi-user timetable sync pass complete.")
-
-                # 5. Process timetables across all active users & enqueue active classes
-                now = get_now_ist()
-                total_enqueued = 0
-
-                for user in active_users:
-                    uid = user["id"]
-                    user_tt = get_user_timetable(uid, today_str)
-                    if not user_tt or not user_tt.get("classes"):
+                        target_time = asyncio.get_event_loop().time() + 30
+                        while asyncio.get_event_loop().time() < target_time and self._is_running:
+                            try:
+                                from .redis_service import redis_service
+                                redis_service.set_scheduler_heartbeat()
+                            except Exception:
+                                pass
+                            if timetable_cache.is_sync_requested():
+                                break
+                            await asyncio.sleep(5)
                         continue
 
-                    for c in user_tt["classes"]:
-                        start_str = c.get("start_time")
-                        end_str = c.get("end_time")
-                        if not start_str or not end_str:
+                    logger.info(f"Scheduler: Discovered {len(active_users)} active portal user(s).")
+
+                    # 3. Handle DEBUG_MODE simulation if active
+                    if settings.DEBUG_MODE:
+                        logger.info("=== DEBUG_MODE SIMULATION ACTIVE ===")
+                        now = get_now_ist()
+                        if settings.DEBUG_SIMULATION_MODE.upper() == "FAILURE":
+                            join_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting-fail"
+                            subject = "DEBUG_FAIL"
+                        else:
+                            join_url = f"{settings.BACKEND_INTERNAL_URL}/debug-meeting"
+                            subject = "DEBUG_SUCCESS"
+
+                        active_class = {
+                            "subject_code": subject,
+                            "subject_name": "Debug Automation Class",
+                            "faculty": "Dr. Playwright Tester",
+                            "timings": "10:00 AM - 11:00 AM",
+                            "start_time": (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "end_time": (now + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "join_url": join_url,
+                            "status": "UPCOMING"
+                        }
+                        for u in active_users:
+                            user_tt = get_user_timetable(u["id"], today_str)
+                            if not user_tt:
+                                save_user_timetable(u["id"], today_str, [active_class], verified_at=now.strftime("%Y-%m-%d %H:%M:%S"))
+
+                    # 4. Multi-User Timetable Sync Check
+                    sync_requested = timetable_cache.is_sync_requested()
+                    users_to_sync = [
+                        u for u in active_users
+                        if user_needs_timetable_sync(u["id"], today_str, sync_requested=sync_requested)
+                    ]
+
+                    if users_to_sync and not settings.DEBUG_MODE:
+                        logger.info(f"Scheduler: {len(users_to_sync)} user(s) require timetable sync. Launching browser...")
+                        update_ingestion_status(
+                            "processing",
+                            details=f"Performing headless timetable sync for {len(users_to_sync)} user(s)"
+                        )
+
+                        async with async_playwright() as p:
+                            browser = await p.chromium.launch(
+                                headless=settings.HEADLESS,
+                                args=["--start-maximized"]
+                            )
+                            try:
+                                for user in users_to_sync:
+                                    await sync_user_timetable_in_context(browser, user, today_str)
+                            finally:
+                                await browser.close()
+                                logger.info("Scheduler: Headless browser closed cleanly.")
+
+                        timetable_cache.set_sync_request(False)
+                        update_ingestion_status("idle", details="Multi-user timetable sync pass complete.")
+
+                    # 5. Process timetables across all active users & enqueue active classes
+                    now = get_now_ist()
+                    total_enqueued = 0
+
+                    for user in active_users:
+                        uid = user["id"]
+                        user_tt = get_user_timetable(uid, today_str)
+                        if not user_tt or not user_tt.get("classes"):
                             continue
 
-                        try:
-                            start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-                        except Exception:
+                        for c in user_tt["classes"]:
+                            start_str = c.get("start_time")
+                            end_str = c.get("end_time")
+                            if not start_str or not end_str:
+                                continue
+
                             try:
-                                start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
                             except Exception:
-                                continue
-
-                        try:
-                            end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            try:
-                                end_dt = datetime.fromisoformat(str(end_str).replace("Z", "+00:00")).replace(tzinfo=None)
-                            except Exception:
-                                continue
-
-                        subject = c.get("subject_code", "Lecture")
-                        class_status = c.get("status")
-
-                        # 5a. Expired timetable finalization (now > end_dt + 5 minutes)
-                        if class_status not in TERMINAL_STATUSES:
-                            if now > (end_dt + timedelta(minutes=5)):
-                                # Active-processing protection: check Redis ExecutionLock
-                                lock_held = False
-                                if settings.REDIS_URL:
-                                    try:
-                                        r = get_redis_client()
-                                        lock_key = get_execution_lock_key(uid, c)
-                                        if r.exists(lock_key):
-                                            lock_held = True
-                                    except Exception as lk_err:
-                                        logger.debug(f"Scheduler: Error checking lock for user {uid}: {lk_err}")
-
-                                if lock_held:
-                                    logger.info(
-                                        f"Scheduler: Class {subject} for user {uid} is past end_time + 5m, "
-                                        f"but active ExecutionLock is held. Leaving QUEUED for worker completion."
-                                    )
-                                else:
-                                    logger.info(
-                                        f"Scheduler: Expired class detected for user {uid}: {subject} "
-                                        f"(end_time {end_str} + 5m passed, no active lock). Transitioning to MISSED."
-                                    )
-                                    update_user_class_status(
-                                        uid, today_str, subject, timings=c.get("timings"), new_status="MISSED"
-                                    )
-                                    c["status"] = "MISSED"
-                                continue
-
-                        # 5b. Terminal-state invariance: never process or re-enqueue terminal classes
-                        if class_status in TERMINAL_STATUSES:
-                            continue
-
-                        should_join = False
-                        if start_dt <= now <= end_dt:
-                            should_join = True
-                        elif settings.DEBUG_MODE:
-                            should_join = True
-
-                        if should_join and c.get("status") not in TERMINAL_STATUSES and c.get("status") != "QUEUED":
-                            logger.info(f"Scheduler: Active class found for user {uid}: {subject}. Enqueueing to Redis...")
-
-                            if settings.REDIS_URL:
                                 try:
-                                    job, enqueued = schedule_class_to_queue(c, user_id=uid)
-                                    if enqueued and job:
+                                    start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                                except Exception:
+                                    continue
+
+                            try:
+                                end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                try:
+                                    end_dt = datetime.fromisoformat(str(end_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                                except Exception:
+                                    continue
+
+                            subject = c.get("subject_code", "Lecture")
+                            class_status = c.get("status")
+
+                            # 5a. Expired timetable finalization (now > end_dt + 5 minutes)
+                            if class_status not in TERMINAL_STATUSES:
+                                if now > (end_dt + timedelta(minutes=5)):
+                                    # Active-processing protection: check Redis ExecutionLock
+                                    lock_held = False
+                                    if settings.REDIS_URL:
+                                        try:
+                                            r = get_redis_client()
+                                            lock_key = get_execution_lock_key(uid, c)
+                                            if r.exists(lock_key):
+                                                lock_held = True
+                                        except Exception as lk_err:
+                                            logger.debug(f"Scheduler: Error checking lock for user {uid}: {lk_err}")
+
+                                    if lock_held:
                                         logger.info(
-                                            f"Scheduler: Successfully enqueued job {job.job_id} "
-                                            f"({job.idempotency_key}) for user {uid}."
+                                            f"Scheduler: Class {subject} for user {uid} is past end_time + 5m, "
+                                            f"but active ExecutionLock is held. Leaving QUEUED for worker completion."
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Scheduler: Expired class detected for user {uid}: {subject} "
+                                            f"(end_time {end_str} + 5m passed, no active lock). Transitioning to MISSED."
                                         )
                                         update_user_class_status(
-                                            uid, today_str, subject, timings=c.get("timings"), new_status="QUEUED"
+                                            uid, today_str, subject, timings=c.get("timings"), new_status="MISSED"
                                         )
-                                        total_enqueued += 1
-                                    elif not enqueued:
-                                        logger.info(
-                                            f"Scheduler: Job for user {uid}, {subject} already enqueued/deduplicated."
-                                        )
-                                        # Non-destructive deduplication: NEVER overwrite terminal status
-                                        if c.get("status") not in TERMINAL_STATUSES:
+                                        c["status"] = "MISSED"
+                                    continue
+
+                            # 5b. Terminal-state invariance: never process or re-enqueue terminal classes
+                            if class_status in TERMINAL_STATUSES:
+                                continue
+
+                            should_join = False
+                            if start_dt <= now <= end_dt:
+                                should_join = True
+                            elif settings.DEBUG_MODE:
+                                should_join = True
+
+                            if should_join and c.get("status") not in TERMINAL_STATUSES and c.get("status") != "QUEUED":
+                                logger.info(f"Scheduler: Active class found for user {uid}: {subject}. Enqueueing to Redis...")
+
+                                if settings.REDIS_URL:
+                                    try:
+                                        job, enqueued = schedule_class_to_queue(c, user_id=uid)
+                                        if enqueued and job:
+                                            logger.info(
+                                                f"Scheduler: Successfully enqueued job {job.job_id} "
+                                                f"({job.idempotency_key}) for user {uid}."
+                                            )
                                             update_user_class_status(
                                                 uid, today_str, subject, timings=c.get("timings"), new_status="QUEUED"
                                             )
-                                except Exception as q_err:
-                                    logger.error(
-                                        f"Scheduler: Failed to enqueue class job to Redis for user {uid}: {q_err}. "
-                                        f"Will retry on next tick."
-                                    )
-                            else:
-                                logger.error("Scheduler: REDIS_URL not configured. Cannot enqueue class job to Redis.")
+                                            total_enqueued += 1
+                                        elif not enqueued:
+                                            logger.info(
+                                                f"Scheduler: Job for user {uid}, {subject} already enqueued/deduplicated."
+                                            )
+                                            # Non-destructive deduplication: NEVER overwrite terminal status
+                                            if c.get("status") not in TERMINAL_STATUSES:
+                                                update_user_class_status(
+                                                    uid, today_str, subject, timings=c.get("timings"), new_status="QUEUED"
+                                                )
+                                    except Exception as q_err:
+                                        logger.error(
+                                            f"Scheduler: Failed to enqueue class job to Redis for user {uid}: {q_err}. "
+                                            f"Will retry on next tick."
+                                        )
+                                else:
+                                    logger.error("Scheduler: REDIS_URL not configured. Cannot enqueue class job to Redis.")
 
-                if settings.DEMO_MODE and total_enqueued > 0:
-                    logger.info("=== DEMO_MODE SINGLE RUN COMPLETE, GOING IDLE ===")
-                    while self._is_running:
-                        await asyncio.sleep(3600)
-                elif settings.DEBUG_MODE and total_enqueued > 0:
-                    logger.info("=== DEBUG_MODE SINGLE RUN COMPLETE, BREAKING LOOP ===")
-                    break
+                    if settings.DEMO_MODE and total_enqueued > 0:
+                        logger.info("=== DEMO_MODE SINGLE RUN COMPLETE, GOING IDLE ===")
+                        while self._is_running:
+                            await asyncio.sleep(3600)
+                    elif settings.DEBUG_MODE and total_enqueued > 0:
+                        logger.info("=== DEBUG_MODE SINGLE RUN COMPLETE, BREAKING LOOP ===")
+                        break
 
-                # 6. Unified Multi-User Smart Sleep Calculation
-                all_upcoming = []
-                total_classes_today = 0
-                now = get_now_ist()
+                    # 6. Unified Multi-User Smart Sleep Calculation
+                    all_upcoming = []
+                    total_classes_today = 0
+                    now = get_now_ist()
 
-                for user in active_users:
-                    uid = user["id"]
-                    user_tt = get_user_timetable(uid, today_str)
-                    if not user_tt or not user_tt.get("classes"):
-                        continue
-                    classes = user_tt["classes"]
-                    total_classes_today += len(classes)
-                    for c in classes:
-                        if c.get("status") in TERMINAL_STATUSES or c.get("status") == "QUEUED":
+                    for user in active_users:
+                        uid = user["id"]
+                        user_tt = get_user_timetable(uid, today_str)
+                        if not user_tt or not user_tt.get("classes"):
                             continue
-                        start_str = c.get("start_time")
-                        if not start_str:
-                            continue
-                        try:
-                            start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-                            if start_dt > now:
+                        classes = user_tt["classes"]
+                        total_classes_today += len(classes)
+                        for c in classes:
+                            if c.get("status") in TERMINAL_STATUSES or c.get("status") == "QUEUED":
+                                continue
+                            start_str = c.get("start_time")
+                            if not start_str:
+                                continue
+                            start_dt = None
+                            try:
+                                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                try:
+                                    start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                                except Exception:
+                                    continue
+
+                            if start_dt and start_dt > now:
                                 all_upcoming.append((start_dt, uid, c))
-                        except Exception:
-                            continue
 
-                if all_upcoming:
-                    all_upcoming.sort(key=lambda x: x[0])
-                    earliest_dt, earliest_uid, earliest_class = all_upcoming[0]
-                    seconds_remaining = (earliest_dt - now).total_seconds()
-                    sleep_duration = max(seconds_remaining - 300, 30)
+                    if all_upcoming:
+                        all_upcoming.sort(key=lambda x: x[0])
+                        earliest_dt, earliest_uid, earliest_class = all_upcoming[0]
+                        seconds_remaining = (earliest_dt - now).total_seconds()
+                        sleep_duration = max(seconds_remaining - 300, 30)
 
-                    logger.info(
-                        f"Scheduler: Next upcoming class across all users is {earliest_class.get('subject_code')} "
-                        f"(user {earliest_uid}) starting at {earliest_dt.strftime('%Y-%m-%d %H:%M:%S')}."
-                    )
-                    logger.info(f"Scheduler: Entering smart sleep for {sleep_duration:.0f} seconds (waking 5m before start)...")
-                    update_ingestion_status(
-                        "idle",
-                        details=f"Next class: {earliest_class.get('subject_code')} (user {earliest_uid}) at {earliest_dt.strftime('%I:%M %p')}"
-                    )
+                        logger.info(
+                            f"Scheduler: Next upcoming class across all users is {earliest_class.get('subject_code')} "
+                            f"(user {earliest_uid}) starting at {earliest_dt.strftime('%Y-%m-%d %H:%M:%S')}."
+                        )
+                        logger.info(f"Scheduler: Entering smart sleep for {sleep_duration:.0f} seconds (waking 5m before start)...")
+                        update_ingestion_status(
+                            "idle",
+                            details=f"Next class: {earliest_class.get('subject_code')} (user {earliest_uid}) at {earliest_dt.strftime('%I:%M %p')}"
+                        )
 
-                    target_time = asyncio.get_event_loop().time() + sleep_duration
-                    while asyncio.get_event_loop().time() < target_time and self._is_running:
-                        try:
-                            from .redis_service import redis_service
-                            redis_service.set_scheduler_heartbeat()
-                        except Exception:
-                            pass
-                        if timetable_cache.is_sync_requested() or get_now_ist().strftime("%Y-%m-%d") != today_str:
-                            logger.info("Scheduler: Sleep interrupted by sync request or date rollover. Waking up!")
-                            break
-                        await asyncio.sleep(10)
+                        target_time = asyncio.get_event_loop().time() + sleep_duration
+                        while asyncio.get_event_loop().time() < target_time and self._is_running:
+                            try:
+                                from .redis_service import redis_service
+                                redis_service.set_scheduler_heartbeat()
+                            except Exception:
+                                pass
+                            if timetable_cache.is_sync_requested() or get_now_ist().strftime("%Y-%m-%d") != today_str:
+                                logger.info("Scheduler: Sleep interrupted by sync request or date rollover. Waking up!")
+                                break
+                            await asyncio.sleep(10)
 
-                else:
-                    if total_classes_today == 0:
-                        logger.info("Scheduler: No classes scheduled for any active users today.")
-                        status_details = "No classes scheduled for today across active users. Resting until tomorrow."
                     else:
-                        logger.info("Scheduler: All scheduled classes for today have been queued or finalized across all active users.")
-                        status_details = "All classes queued/finalized for today. Resting until tomorrow."
+                        if total_classes_today == 0:
+                            logger.info("Scheduler: No classes scheduled for any active users today.")
+                            status_details = "No classes scheduled for today across active users. Resting until tomorrow."
+                        else:
+                            logger.info("Scheduler: All scheduled classes for today have been queued or finalized across all active users.")
+                            status_details = "All classes queued/finalized for today. Resting until tomorrow."
 
-                    current_ist = get_now_ist()
-                    if current_ist.time() < time(8, 0):
-                        target_wake = datetime.combine(current_ist.date(), time(8, 0))
-                        target_desc = "today 8:00 AM"
-                    else:
-                        target_wake = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
-                        target_desc = "tomorrow 8:00 AM"
-                    sleep_duration = max((target_wake - current_ist).total_seconds(), 30)
+                        current_ist = get_now_ist()
+                        if current_ist.time() < time(8, 0):
+                            target_wake = datetime.combine(current_ist.date(), time(8, 0))
+                            target_desc = "today 8:00 AM"
+                        else:
+                            target_wake = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))
+                            target_desc = "tomorrow 8:00 AM"
+                        sleep_duration = max((target_wake - current_ist).total_seconds(), 30)
 
-                    logger.info(f"Scheduler: Entering smart sleep until {target_desc} ({sleep_duration:.0f} seconds)...")
-                    update_ingestion_status("idle", details=status_details)
+                        logger.info(f"Scheduler: Entering smart sleep until {target_desc} ({sleep_duration:.0f} seconds)...")
+                        update_ingestion_status("idle", details=status_details)
 
-                    target_time = asyncio.get_event_loop().time() + sleep_duration
-                    while asyncio.get_event_loop().time() < target_time and self._is_running:
-                        try:
-                            from .redis_service import redis_service
-                            redis_service.set_scheduler_heartbeat()
-                        except Exception:
-                            pass
-                        if timetable_cache.is_sync_requested() or get_now_ist().strftime("%Y-%m-%d") != today_str:
-                            logger.info("Scheduler: Sleep interrupted by sync request or date rollover. Waking up!")
-                            break
-                        await asyncio.sleep(10)
+                        target_time = asyncio.get_event_loop().time() + sleep_duration
+                        while asyncio.get_event_loop().time() < target_time and self._is_running:
+                            try:
+                                from .redis_service import redis_service
+                                redis_service.set_scheduler_heartbeat()
+                            except Exception:
+                                pass
+                            if timetable_cache.is_sync_requested() or get_now_ist().strftime("%Y-%m-%d") != today_str:
+                                logger.info("Scheduler: Sleep interrupted by sync request or date rollover. Waking up!")
+                                break
+                            await asyncio.sleep(10)
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as loop_err:
+                    from .worker_consumer import sanitize_log_message
+                    err_msg = sanitize_log_message(str(loop_err))[:300]
+                    logger.error(
+                        f"Scheduler: Unexpected error in scheduler loop: {type(loop_err).__name__}: {err_msg}. "
+                        "Backing off for 5s before next iteration."
+                    )
+                    if not self._is_running:
+                        break
+                    try:
+                        await asyncio.sleep(5)
+                    except asyncio.CancelledError:
+                        raise
 
         except asyncio.CancelledError:
             logger.info("SchedulerService: Cancelled. Shutting down scheduler gracefully...")
         finally:
+            self._is_running = False
             logger.info("SchedulerService: Stopped cleanly.")
 
 

@@ -303,6 +303,7 @@ def save_user_timetable(
     max_retries = 3
     backoff = 0.1
     terminal_statuses = {"COMPLETED", "FACULTY_NOT_STARTED", "FAILED", "MISSED"}
+    preserved_statuses = terminal_statuses | {"QUEUED"}
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -310,25 +311,37 @@ def save_user_timetable(
                 existing_tt = get_user_timetable(user_id, date_str)
                 existing_classes = (existing_tt.get("classes") or []) if existing_tt else []
 
-                if existing_classes and classes:
+                if existing_classes:
                     reconciled = []
-                    for incoming in classes:
-                        c_dict = dict(incoming)
-                        matched_existing = None
-                        for ec in existing_classes:
-                            if _classes_match_identity(ec, c_dict):
-                                matched_existing = ec
-                                break
+                    matched_existing_indices = set()
 
-                        if matched_existing:
-                            existing_status = matched_existing.get("status")
-                            incoming_status = c_dict.get("status") or "UPCOMING"
-                            if existing_status in terminal_statuses:
-                                c_dict["status"] = existing_status
-                            elif existing_status == "QUEUED":
-                                if incoming_status not in terminal_statuses:
-                                    c_dict["status"] = "QUEUED"
-                        reconciled.append(c_dict)
+                    if classes:
+                        for incoming in classes:
+                            c_dict = dict(incoming)
+                            matched_existing = None
+                            for idx, ec in enumerate(existing_classes):
+                                if _classes_match_identity(ec, c_dict):
+                                    matched_existing = ec
+                                    matched_existing_indices.add(idx)
+                                    break
+
+                            if matched_existing:
+                                existing_status = matched_existing.get("status")
+                                incoming_status = c_dict.get("status") or "UPCOMING"
+                                if existing_status in terminal_statuses:
+                                    c_dict["status"] = existing_status
+                                elif existing_status == "QUEUED":
+                                    if incoming_status not in terminal_statuses:
+                                        c_dict["status"] = "QUEUED"
+                            reconciled.append(c_dict)
+
+                    # Retain any existing executed/in-flight classes omitted from incoming portal data
+                    for idx, ec in enumerate(existing_classes):
+                        if idx not in matched_existing_indices:
+                            ec_status = ec.get("status")
+                            if ec_status in preserved_statuses:
+                                reconciled.append(dict(ec))
+
                     classes_to_save = reconciled
                 else:
                     classes_to_save = classes

@@ -300,6 +300,8 @@ def quarantine_malformed_message(
     main_stream_name: str = DEFAULT_STREAM_NAME,
     stream_name: Optional[str] = None,
     group_name: str = DEFAULT_CONSUMER_GROUP,
+    maxlen: Optional[int] = None,
+    approximate: bool = True,
 ) -> Optional[str]:
     """
     Safely quarantines a malformed, unparseable, or security-rejected stream message to the DLQ.
@@ -345,8 +347,14 @@ def quarantine_malformed_message(
         "quarantined_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    dlq_maxlen = maxlen if maxlen is not None else getattr(settings, "QUEUE_DLQ_MAXLEN", 10000)
     try:
-        dlq_msg_id = r.xadd(dlq_stream_name, dlq_payload)
+        dlq_msg_id = r.xadd(
+            dlq_stream_name,
+            dlq_payload,
+            maxlen=dlq_maxlen,
+            approximate=approximate,
+        )
         logger.warning(
             f"JobQueue: Quarantined malformed message '{message_id}' to DLQ '{dlq_stream_name}' "
             f"(DLQ ID: {dlq_msg_id}): {safe_error}"
@@ -608,6 +616,8 @@ def route_to_dead_letter_queue(
     dlq_stream_name: str = DEFAULT_DLQ_STREAM_NAME,
     main_stream_name: str = DEFAULT_STREAM_NAME,
     group_name: str = DEFAULT_CONSUMER_GROUP,
+    maxlen: Optional[int] = None,
+    approximate: bool = True,
 ) -> Optional[str]:
     """
     Safely routes a poisoned/unrecoverable job to the Dead-Letter Queue (DLQ) stream.
@@ -639,8 +649,14 @@ def route_to_dead_letter_queue(
         "quarantined_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    dlq_maxlen = maxlen if maxlen is not None else getattr(settings, "QUEUE_DLQ_MAXLEN", 10000)
     try:
-        dlq_msg_id = r.xadd(dlq_stream_name, dlq_payload)
+        dlq_msg_id = r.xadd(
+            dlq_stream_name,
+            dlq_payload,
+            maxlen=dlq_maxlen,
+            approximate=approximate,
+        )
         logger.warning(
             f"JobQueue: Quarantined poison job '{job.job_id}' (delivery_count={job.delivery_count}) "
             f"to DLQ '{dlq_stream_name}' (DLQ ID: {dlq_msg_id})."
