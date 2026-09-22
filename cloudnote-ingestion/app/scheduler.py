@@ -33,7 +33,13 @@ from .database import (
 from .timetable_cache import timetable_cache
 from .timetable_fetcher import fetch_timetable_data
 from .login import perform_login
-from .job_queue import schedule_class_to_queue
+from .job_queue import (
+    schedule_class_to_queue,
+    get_execution_lock_key,
+    get_redis_client,
+)
+
+TERMINAL_STATUSES = {"COMPLETED", "FACULTY_NOT_STARTED", "FAILED", "MISSED"}
 
 
 async def wait_for_countdown(page, countdown_selector: str = ""):
@@ -295,8 +301,55 @@ class StandaloneSchedulerService:
 
                         try:
                             start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            try:
+                                start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                            except Exception:
+                                continue
+
+                        try:
                             end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
                         except Exception:
+                            try:
+                                end_dt = datetime.fromisoformat(str(end_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                            except Exception:
+                                continue
+
+                        subject = c.get("subject_code", "Lecture")
+                        class_status = c.get("status")
+
+                        # 5a. Expired timetable finalization (now > end_dt + 5 minutes)
+                        if class_status not in TERMINAL_STATUSES:
+                            if now > (end_dt + timedelta(minutes=5)):
+                                # Active-processing protection: check Redis ExecutionLock
+                                lock_held = False
+                                if settings.REDIS_URL:
+                                    try:
+                                        r = get_redis_client()
+                                        lock_key = get_execution_lock_key(uid, c)
+                                        if r.exists(lock_key):
+                                            lock_held = True
+                                    except Exception as lk_err:
+                                        logger.debug(f"Scheduler: Error checking lock for user {uid}: {lk_err}")
+
+                                if lock_held:
+                                    logger.info(
+                                        f"Scheduler: Class {subject} for user {uid} is past end_time + 5m, "
+                                        f"but active ExecutionLock is held. Leaving QUEUED for worker completion."
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Scheduler: Expired class detected for user {uid}: {subject} "
+                                        f"(end_time {end_str} + 5m passed, no active lock). Transitioning to MISSED."
+                                    )
+                                    update_user_class_status(
+                                        uid, today_str, subject, timings=c.get("timings"), new_status="MISSED"
+                                    )
+                                    c["status"] = "MISSED"
+                                continue
+
+                        # 5b. Terminal-state invariance: never process or re-enqueue terminal classes
+                        if class_status in TERMINAL_STATUSES:
                             continue
 
                         should_join = False
@@ -305,8 +358,7 @@ class StandaloneSchedulerService:
                         elif settings.DEBUG_MODE:
                             should_join = True
 
-                        if should_join and c.get("status") not in ("COMPLETED", "QUEUED"):
-                            subject = c.get("subject_code", "Lecture")
+                        if should_join and c.get("status") not in TERMINAL_STATUSES and c.get("status") != "QUEUED":
                             logger.info(f"Scheduler: Active class found for user {uid}: {subject}. Enqueueing to Redis...")
 
                             if settings.REDIS_URL:
@@ -325,9 +377,11 @@ class StandaloneSchedulerService:
                                         logger.info(
                                             f"Scheduler: Job for user {uid}, {subject} already enqueued/deduplicated."
                                         )
-                                        update_user_class_status(
-                                            uid, today_str, subject, timings=c.get("timings"), new_status="QUEUED"
-                                        )
+                                        # Non-destructive deduplication: NEVER overwrite terminal status
+                                        if c.get("status") not in TERMINAL_STATUSES:
+                                            update_user_class_status(
+                                                uid, today_str, subject, timings=c.get("timings"), new_status="QUEUED"
+                                            )
                                 except Exception as q_err:
                                     logger.error(
                                         f"Scheduler: Failed to enqueue class job to Redis for user {uid}: {q_err}. "
@@ -357,7 +411,7 @@ class StandaloneSchedulerService:
                     classes = user_tt["classes"]
                     total_classes_today += len(classes)
                     for c in classes:
-                        if c.get("status") in ("COMPLETED", "QUEUED"):
+                        if c.get("status") in TERMINAL_STATUSES or c.get("status") == "QUEUED":
                             continue
                         start_str = c.get("start_time")
                         if not start_str:
@@ -402,8 +456,8 @@ class StandaloneSchedulerService:
                         logger.info("Scheduler: No classes scheduled for any active users today.")
                         status_details = "No classes scheduled for today across active users. Resting until tomorrow."
                     else:
-                        logger.info("Scheduler: All scheduled classes for today have been queued or completed across all active users.")
-                        status_details = "All classes queued/completed for today. Resting until tomorrow."
+                        logger.info("Scheduler: All scheduled classes for today have been queued or finalized across all active users.")
+                        status_details = "All classes queued/finalized for today. Resting until tomorrow."
 
                     current_ist = get_now_ist()
                     tomorrow_8am = datetime.combine(current_ist.date() + timedelta(days=1), time(8, 0))

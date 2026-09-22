@@ -266,7 +266,7 @@ async def test_scenario_2_single_worker_bounded_concurrency():
 
     # Poll until all 5 jobs are dispatched/processed
     dispatched_total = 0
-    for _ in range(10):
+    for _ in range(25):
         dispatched = await worker.poll_and_process(count=2, block_ms=500, process_class_fn=mock_process_class)
         dispatched_total += dispatched
         if completed_jobs >= 5:

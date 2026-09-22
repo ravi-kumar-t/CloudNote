@@ -95,13 +95,14 @@ async def run_step3b_tests():
         idle_timeout_ms=300000,
     )
 
+    from datetime import datetime, timedelta
     fake_class_meta = {
         "subject_code": "CSE401",
         "subject_name": "Cloud Computing",
         "faculty": "Dr. Test Node",
         "timings": "11:00 AM - 12:00 PM",
-        "start_time": "2026-09-17 11:00:00",
-        "end_time": "2026-09-17 12:00:00",
+        "start_time": (datetime.now() - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": (datetime.now() + timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S"),
         "join_url": "https://test.example.com/join/cse401",
     }
 

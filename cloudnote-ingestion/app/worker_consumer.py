@@ -109,58 +109,78 @@ class WorkerConsumer:
     ) -> bool:
         """
         Updates the matching class entry in SQLite user_timetables with the terminal status.
-        Preserves the exact terminal status (COMPLETED, FACULTY_NOT_STARTED, FAILED)
+        Preserves the exact terminal status (COMPLETED, FACULTY_NOT_STARTED, FAILED, MISSED)
         without altering the schema or inventing new statuses.
+        Includes bounded retry (3 attempts, 0.1s backoff) for transient SQLite 'database is locked'.
         """
-        try:
-            from .database import update_user_class_status
-            subject_code = class_metadata.get("subject_code") or class_metadata.get("subject", "")
-            timings = class_metadata.get("timings")
+        import time
+        import sqlite3
+        max_retries = 3
+        backoff = 0.1
 
-            date_str = class_metadata.get("date")
-            if not date_str and class_metadata.get("start_time"):
-                start_val = str(class_metadata["start_time"])
-                if " " in start_val:
-                    date_str = start_val.split(" ")[0]
-                elif "T" in start_val:
-                    date_str = start_val.split("T")[0]
-            if not date_str:
-                from .utils import get_now_ist
-                date_str = get_now_ist().strftime("%Y-%m-%d")
+        for attempt in range(1, max_retries + 1):
+            try:
+                from .database import update_user_class_status
+                subject_code = class_metadata.get("subject_code") or class_metadata.get("subject", "")
+                timings = class_metadata.get("timings")
 
-            updated = update_user_class_status(
-                user_id=user_id,
-                date_str=date_str,
-                subject_code=subject_code,
-                timings=timings,
-                new_status=new_status,
-            )
-            if not updated and timings:
-                # Fallback to match on subject_code without strict timings match
+                date_str = class_metadata.get("date")
+                if not date_str and class_metadata.get("start_time"):
+                    start_val = str(class_metadata["start_time"])
+                    if " " in start_val:
+                        date_str = start_val.split(" ")[0]
+                    elif "T" in start_val:
+                        date_str = start_val.split("T")[0]
+                if not date_str:
+                    from .utils import get_now_ist
+                    date_str = get_now_ist().strftime("%Y-%m-%d")
+
                 updated = update_user_class_status(
                     user_id=user_id,
                     date_str=date_str,
                     subject_code=subject_code,
-                    timings=None,
+                    timings=timings,
                     new_status=new_status,
                 )
+                if not updated and timings:
+                    # Fallback to match on subject_code without strict timings match
+                    updated = update_user_class_status(
+                        user_id=user_id,
+                        date_str=date_str,
+                        subject_code=subject_code,
+                        timings=None,
+                        new_status=new_status,
+                    )
 
-            if updated:
-                logger.info(
-                    f"WorkerConsumer: Synchronized timetable status to '{new_status}' "
-                    f"for user {user_id}, subject '{subject_code}', date '{date_str}'."
+                if updated:
+                    logger.info(
+                        f"WorkerConsumer: Synchronized timetable status to '{new_status}' "
+                        f"for user {user_id}, subject '{subject_code}', date '{date_str}'."
+                    )
+                else:
+                    logger.debug(
+                        f"WorkerConsumer: No matching timetable row found or terminal overwrite blocked "
+                        f"for user {user_id}, subject '{subject_code}', date '{date_str}'."
+                    )
+                return updated
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < max_retries:
+                    logger.warning(
+                        f"WorkerConsumer: SQLite database locked (attempt {attempt}/{max_retries}) "
+                        f"updating timetable for user {user_id}, retrying in {backoff}s..."
+                    )
+                    time.sleep(backoff)
+                    continue
+                logger.warning(
+                    f"WorkerConsumer: Failed updating user_timetables for user {user_id}: {e}"
                 )
-            else:
-                logger.debug(
-                    f"WorkerConsumer: No matching timetable row found to update for user {user_id}, "
-                    f"subject '{subject_code}', date '{date_str}'."
+                return False
+            except Exception as e:
+                logger.warning(
+                    f"WorkerConsumer: Failed updating user_timetables for user {user_id}: {e}"
                 )
-            return updated
-        except Exception as e:
-            logger.warning(
-                f"WorkerConsumer: Failed updating user_timetables for user {user_id}: {e}"
-            )
-            return False
+                return False
+        return False
 
     async def process_single_job(
         self,
@@ -169,6 +189,7 @@ class WorkerConsumer:
         is_reclaimed: bool = False,
         lock_ttl_seconds: int = 60,
         lock_heartbeat_interval: float = 15.0,
+        drain_stale_jobs: bool = True,
     ) -> bool:
         """
         Processes an individual IngestionJob adhering strictly to failure & ACK policies:
@@ -183,12 +204,16 @@ class WorkerConsumer:
            - Updates SQLite timetable status to FAILED.
            - Emits XACK to clear the message from the main stream PEL.
            - Does NOT execute process_class again.
-        3. SQLite Credential Lookup: Resolves user profile and decrypts portal password in memory.
-        4. Terminal Failures (User not found, Missing credentials):
+        3. Stale Redis-Job Drain (now > end_dt + 5 minutes):
+           - Drains stale job without launching browser/Playwright.
+           - Updates timetable to MISSED if not already terminal.
+           - Emits XACK to clear message from stream.
+        4. SQLite Credential Lookup: Resolves user profile and decrypts portal password in memory.
+        5. Terminal Failures (User not found, Missing credentials):
            Logged safely and ACKed to avoid infinite retries / poisoning; updates timetable to FAILED for missing creds.
-        5. Application Outcomes (COMPLETED, FACULTY_NOT_STARTED, FAILED):
+        6. Application Outcomes (COMPLETED, FACULTY_NOT_STARTED, FAILED):
            State is recorded authoritatively in user_timetables and session status; job is ACKed.
-        6. Unexpected Worker Exception:
+        7. Unexpected Worker Exception:
            DO NOT ACK. Message remains in PEL for stale recovery until delivery attempts are exhausted.
         """
         subject = job.class_metadata.get("subject_code", "UnknownClass")
@@ -258,7 +283,62 @@ class WorkerConsumer:
                     pass
                 return False
 
-            # 3. Retrieve user and decrypt credentials strictly in memory
+            # 3. Stale Redis-Job Drain Check (now > end_dt + 5 minutes)
+            # If the class end time has already elapsed by more than 5 minutes:
+            # - do NOT launch browser / Playwright
+            # - update timetable to MISSED if not already terminal
+            # - ACK the stale Redis message
+            # - return without executing process_class
+            if drain_stale_jobs:
+                from .utils import get_now_ist
+                from datetime import timedelta
+                now = get_now_ist()
+                end_str = job.class_metadata.get("end_time")
+                is_stale = False
+                if end_str:
+                    try:
+                        s = str(end_str).strip()
+                        end_dt = None
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                            try:
+                                end_dt = datetime.strptime(s, fmt)
+                                break
+                            except ValueError:
+                                pass
+                        if not end_dt and "T" in s:
+                            end_dt = datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+
+                        if end_dt and now > (end_dt + timedelta(minutes=5)):
+                            is_stale = True
+                    except Exception as parse_err:
+                        logger.debug(f"WorkerConsumer: Could not parse end_time '{end_str}': {parse_err}")
+
+                if is_stale:
+                    logger.warning(
+                        f"WorkerConsumer: Job '{job.job_id}' for user {user_id}, subject '{subject}' "
+                        f"is stale (end_time {end_str} + 5m passed). Draining without launching browser."
+                    )
+                    self._sync_timetable_status(user_id, job.class_metadata, new_status="MISSED")
+                    try:
+                        from .session_status import update_session_status
+                        update_session_status(
+                            status="MISSED",
+                            subject=subject,
+                            error=f"Job drained as stale (end_time {end_str} + 5m passed).",
+                            user_id=user_id,
+                        )
+                    except Exception:
+                        pass
+                    if job.stream_message_id:
+                        acknowledge_job(
+                            message_id=job.stream_message_id,
+                            client=self.redis_client,
+                            stream_name=self.stream_name,
+                            group_name=self.group_name,
+                        )
+                    return False
+
+            # 4. Retrieve user and decrypt credentials strictly in memory
             user_creds = get_user_portal_credentials(user_id)
 
             # Policy B: User does not exist in SQLite -> Terminal Failure -> ACK
@@ -295,7 +375,7 @@ class WorkerConsumer:
                     )
                 return False
 
-            # 4. Dispatch to targeted process_class
+            # 5. Dispatch to targeted process_class
             logger.info(
                 f"WorkerConsumer: Dispatched job '{job.job_id}' (stream_id: {job.stream_message_id}) "
                 f"for user {user_id}, subject '{subject}' to process_class."
@@ -364,6 +444,7 @@ class WorkerConsumer:
         job: IngestionJob,
         process_class_fn: Optional[Callable] = None,
         is_reclaimed: bool = False,
+        drain_stale_jobs: bool = True,
     ) -> bool:
         """Executes process_single_job under the concurrency semaphore with exception tracking."""
         async with self._semaphore:
@@ -372,6 +453,7 @@ class WorkerConsumer:
                     job=job,
                     process_class_fn=process_class_fn,
                     is_reclaimed=is_reclaimed,
+                    drain_stale_jobs=drain_stale_jobs,
                 )
             except asyncio.CancelledError:
                 # Task was cancelled during shutdown; process_single_job's finally block
@@ -468,7 +550,12 @@ class WorkerConsumer:
                     )
                     if use_async:
                         task = asyncio.create_task(
-                            self._safe_job_task(stale_job, process_class_fn=process_class_fn, is_reclaimed=True)
+                            self._safe_job_task(
+                                stale_job,
+                                process_class_fn=process_class_fn,
+                                is_reclaimed=True,
+                                drain_stale_jobs=check_stale,
+                            )
                         )
                         self._active_tasks.add(task)
                         task.add_done_callback(self._active_tasks.discard)
@@ -479,6 +566,7 @@ class WorkerConsumer:
                                 stale_job,
                                 process_class_fn=process_class_fn,
                                 is_reclaimed=True,
+                                drain_stale_jobs=check_stale,
                             )
                             if ok:
                                 processed_count += 1
@@ -511,7 +599,12 @@ class WorkerConsumer:
         for job in new_jobs:
             if use_async:
                 task = asyncio.create_task(
-                    self._safe_job_task(job, process_class_fn=process_class_fn, is_reclaimed=False)
+                    self._safe_job_task(
+                        job,
+                        process_class_fn=process_class_fn,
+                        is_reclaimed=False,
+                        drain_stale_jobs=check_stale,
+                    )
                 )
                 self._active_tasks.add(task)
                 task.add_done_callback(self._active_tasks.discard)
@@ -522,6 +615,7 @@ class WorkerConsumer:
                         job,
                         process_class_fn=process_class_fn,
                         is_reclaimed=False,
+                        drain_stale_jobs=check_stale,
                     )
                     if ok:
                         processed_count += 1

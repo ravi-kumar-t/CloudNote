@@ -472,34 +472,65 @@ def update_user_class_status(
 ) -> bool:
     """
     Updates the status of a matching class in user_timetables(user_id, date) to new_status.
+    Enforces terminal-state invariance (COMPLETED, FACULTY_NOT_STARTED, FAILED, MISSED are immutable).
+    Includes bounded retry (3 attempts, 0.1s backoff) for transient SQLite 'database is locked'.
     Returns True if successfully matched and persisted, False otherwise.
     """
-    # Note: SQLite concurrency remains a known limitation and is deferred to a later database/concurrency step.
-    tt = get_user_timetable(user_id, date_str)
-    if not tt or not tt.get("classes"):
-        return False
+    import time
+    import sqlite3
+    max_retries = 3
+    backoff = 0.1
+    terminal_statuses = {"COMPLETED", "FACULTY_NOT_STARTED", "FAILED", "MISSED"}
 
-    classes = tt["classes"]
-    updated = False
-    for c in classes:
-        match_subject = c.get("subject_code") == subject_code
-        match_timings = True
-        if timings:
-            match_timings = (c.get("timings") == timings or c.get("start_time") == timings)
-        if match_subject and match_timings:
-            c["status"] = new_status
-            updated = True
-            break
+    for attempt in range(1, max_retries + 1):
+        try:
+            tt = get_user_timetable(user_id, date_str)
+            if not tt or not tt.get("classes"):
+                return False
 
-    if updated:
-        save_user_timetable(
-            user_id=user_id,
-            date_str=date_str,
-            classes=classes,
-            no_classes_screenshot=tt.get("no_classes_screenshot"),
-            verified_at=tt.get("verified_at")
-        )
-        return True
+            classes = tt["classes"]
+            updated = False
+            for c in classes:
+                match_subject = c.get("subject_code") == subject_code
+                match_timings = True
+                if timings:
+                    match_timings = (c.get("timings") == timings or c.get("start_time") == timings)
+                if match_subject and match_timings:
+                    current_status = c.get("status")
+                    if current_status in terminal_statuses and new_status != current_status:
+                        logger.warning(
+                            f"Database: Refusing to overwrite terminal status '{current_status}' "
+                            f"with '{new_status}' for user {user_id}, {subject_code}."
+                        )
+                        return False
+                    c["status"] = new_status
+                    updated = True
+                    break
+
+            if updated:
+                save_user_timetable(
+                    user_id=user_id,
+                    date_str=date_str,
+                    classes=classes,
+                    no_classes_screenshot=tt.get("no_classes_screenshot"),
+                    verified_at=tt.get("verified_at")
+                )
+                return True
+            return False
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries:
+                logger.warning(
+                    f"Database: SQLite locked in update_user_class_status (attempt {attempt}/{max_retries}), "
+                    f"retrying in {backoff}s..."
+                )
+                time.sleep(backoff)
+                continue
+            logger.error(f"Database: OperationalError in update_user_class_status: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Database: Error in update_user_class_status: {e}")
+            return False
+
     return False
 
 def update_ingestion_status(
