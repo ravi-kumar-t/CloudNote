@@ -1,5 +1,7 @@
 import os
 import json
+import tempfile
+import time
 from datetime import datetime
 from typing import Optional, Union
 from .logger import logger
@@ -171,9 +173,17 @@ class TimetableCache:
         Toggles or updates the cross-process manual sync refresh flag.
         If user_id is provided, tracks or removes the user from pending sync requests.
         Preserves backward compatibility with sync_requested boolean.
+
+        Atomic write (FIX 3, Step 3F.10):
+        The payload is assembled in memory and written to a temporary file in the same
+        directory as SYNC_FILE, then atomically replaced via os.replace().
+        This eliminates the race window where open(SYNC_FILE, 'w') truncates the file
+        to 0 bytes before the write completes, which could expose concurrent readers
+        to empty or partially-written JSON.
         """
         try:
-            os.makedirs(os.path.dirname(SYNC_FILE), exist_ok=True)
+            sync_dir = os.path.dirname(SYNC_FILE)
+            os.makedirs(sync_dir, exist_ok=True)
             existing_data = {}
             if os.path.exists(SYNC_FILE):
                 try:
@@ -200,8 +210,7 @@ class TimetableCache:
                             existing_uids.append(uid_int)
                     except (ValueError, TypeError):
                         pass
-                with open(SYNC_FILE, "w", encoding="utf-8") as f:
-                    json.dump({"sync_requested": True, "user_ids": existing_uids}, f)
+                payload = {"sync_requested": True, "user_ids": existing_uids}
             else:
                 if user_id is not None:
                     try:
@@ -210,11 +219,51 @@ class TimetableCache:
                     except (ValueError, TypeError):
                         pass
                     still_requested = len(existing_uids) > 0
-                    with open(SYNC_FILE, "w", encoding="utf-8") as f:
-                        json.dump({"sync_requested": still_requested, "user_ids": existing_uids}, f)
+                    payload = {"sync_requested": still_requested, "user_ids": existing_uids}
                 else:
-                    with open(SYNC_FILE, "w", encoding="utf-8") as f:
-                        json.dump({"sync_requested": False, "user_ids": []}, f)
+                    payload = {"sync_requested": False, "user_ids": []}
+
+            # Atomic write: build JSON in memory -> temp file -> os.replace()
+            tmp_path = None
+            try:
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=sync_dir,
+                    prefix=".sync_request_tmp_",
+                    suffix=".json"
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                        json.dump(payload, tmp_f)
+                        tmp_f.flush()
+                        os.fsync(tmp_f.fileno())
+                except Exception:
+                    # fd still open if fdopen raised; close it before cleanup
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                # Atomically replace SYNC_FILE with bounded retry for Windows file-locking contention
+                replaced = False
+                last_err = None
+                for attempt in range(10):
+                    try:
+                        os.replace(tmp_path, SYNC_FILE)
+                        replaced = True
+                        tmp_path = None  # replaced successfully; no cleanup needed
+                        break
+                    except OSError as err:
+                        last_err = err
+                        time.sleep(0.015 * (attempt + 1))
+                if not replaced and last_err:
+                    raise last_err
+            except Exception as atomic_err:
+                logger.error(f"Cache: Atomic sync request write failed: {atomic_err}")
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                raise
         except Exception as e:
             logger.error(f"Cache: Failed to write sync request flag: {e}")
 

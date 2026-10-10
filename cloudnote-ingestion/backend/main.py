@@ -479,6 +479,14 @@ def resolve_latest_no_classes_screenshot(user_id: Optional[int] = None):
     If user_id is provided, checks SQLite user_timetables first and user's screenshot directory.
     Returns (abs_file_path, filename_with_user_prefix, verified_at) or (None, None, None).
     Guarantees strict path traversal protection.
+
+    Multi-user isolation policy (FIX 2, Step 3F.10):
+    - If user_id is provided: search ONLY the user-scoped SQLite entry and screenshots/{user_id}/.
+      If no valid screenshot is found, return (None, None, None) immediately.
+      NEVER fall back to the global timetable_cache.json or the root screenshots/ directory,
+      which would risk serving another user's zero-class verification proof.
+    - If user_id is None: use the legacy global timetable_cache.json and root screenshots/
+      scan (single-user / unauthenticated backward compatibility path).
     """
     b_dir = os.path.dirname(os.path.abspath(__file__))
     s_dir = os.path.abspath(os.path.join(b_dir, "..", "screenshots"))
@@ -529,7 +537,13 @@ def resolve_latest_no_classes_screenshot(user_id: Optional[int] = None):
         except Exception as scan_err:
             print(f"[DEBUG] Error scanning user screenshot directory: {scan_err}")
 
-    # 2. Legacy fallback for single-user setup
+        # FIX 2 (Step 3F.10): user_id was provided but no user-scoped screenshot was found.
+        # Return (None, None, None) immediately — do NOT fall through to the global legacy
+        # timetable_cache.json / root screenshots/ scan, which could expose another user's
+        # zero-class verification screenshot.
+        return None, None, None
+
+    # 2. Legacy fallback for genuine single-user / unauthenticated context (user_id is None)
     c_file = os.path.abspath(os.path.join(b_dir, "..", "logs", "timetable_cache.json"))
     target_filename = None
     target_verified_at = None

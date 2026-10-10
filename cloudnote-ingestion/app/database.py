@@ -636,9 +636,13 @@ def update_user_class_status(
                     if current_status in terminal_statuses and new_status != current_status:
                         logger.warning(
                             f"Database: Refusing to overwrite terminal status '{current_status}' "
-                            f"with '{new_status}' for user {user_id}, {subject_code}."
+                            f"with '{new_status}' for user {user_id}, {subject_code}. "
+                            f"Continuing search for later occurrences."
                         )
-                        return False
+                        # FIX 4 (Step 3F.10): continue instead of return False so subsequent
+                        # occurrences of the same subject (e.g. same subject at 14:00 when
+                        # 09:00 is already COMPLETED) are still inspected and updated.
+                        continue
                     c["status"] = new_status
                     updated = True
                     break
@@ -711,13 +715,24 @@ def update_ingestion_status(
 
 
 def get_user_ingestion_status(user_id: Optional[Union[int, str]] = None) -> dict:
-    """Retrieves ingestion status for a specific user, falling back to global state."""
+    """
+    Retrieves ingestion status for a specific user or the legacy global state.
+
+    Multi-user isolation policy (FIX 1, Step 3F.10):
+    - If user_id is provided: read ONLY the user-scoped logs/{user_id}/ingestion_status.json.
+      If it does not exist or cannot be read, return default_status immediately.
+      NEVER fall back to the global logs/ingestion_status.json when a user context is given,
+      to prevent cross-user status leakage.
+    - If user_id is None: use the legacy global logs/ingestion_status.json (single-user
+      backward compatibility path).
+    """
     default_status = {
         "status": "idle",
         "details": "No active scraper processes registered yet.",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     if user_id is not None:
+        # User-scoped path: strict isolation — no global fallback
         user_status_file = os.path.join(get_user_logs_dir(user_id), "ingestion_status.json")
         if os.path.exists(user_status_file) and os.path.getsize(user_status_file) > 0:
             try:
@@ -725,7 +740,10 @@ def get_user_ingestion_status(user_id: Optional[Union[int, str]] = None) -> dict
                     return json.load(f)
             except Exception:
                 pass
+        # User-scoped file absent or unreadable — return clean default, do NOT leak global state
+        return default_status
 
+    # Legacy global path: only reached when user_id is None
     status_file = "logs/ingestion_status.json"
     if os.path.exists(status_file) and os.path.getsize(status_file) > 0:
         try:
